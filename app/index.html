@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Chiaki for Tizen</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app-splash" class="app-splash" aria-hidden="true">
+  <img src="icon_small.png" alt="">
+  <p>Chiaki</p>
+</div>
+
+<!-- TEMPORARY: persistent, always-visible debug trail. Unlike the
+     module-status paragraph (which shows only the single latest message,
+     overwritten on every update) or the 12-second-timeout snapshot (which
+     never renders if the crash happens before then), this shows the FULL
+     accumulated log continuously, so nothing is missed to a fast crash or a
+     flickering single-line status. Remove once diagnosed. -->
+<!-- Was max-height:60vh across the full width, which sat directly on top of
+     #regist-status and the Pair/Cancel actions (the "Pair with console"
+     screen stacks form -> actions -> status vertically and easily runs into
+     the bottom 60% of a 1080p TV viewport) — any pairing status text was
+     rendering underneath this panel, invisible. Kept narrow/short so it
+     stays out of the way of interactive UI. -->
+<!-- Hidden by default now — toggle with the Blue remote key (see
+     KEY.BLUE handling in app.js), so it's fully out of the way during normal
+     use and only covers the screen when actually checking it. -->
+<pre id="ct-debug-log" style="display:none;position:fixed;left:0;width:38vw;bottom:0;max-height:24vh;
+  margin:0;padding:6px 8px;overflow-y:auto;background:rgba(0,0,0,0.85);color:#7fffa0;
+  font-family:monospace;font-size:13px;line-height:1.35;white-space:pre-wrap;
+  z-index:99999;"></pre>
+<script>
+  window.__ctToggleDebugLog = function() {
+    var el = document.getElementById('ct-debug-log');
+    if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+  };
+</script>
+
+<!-- ======================= Console list ======================= -->
+<section id="screen-consoles" class="screen active">
+  <header class="masthead">
+    <img class="app-mark" src="icon_small.png" alt="">
+    <h1>Chiaki</h1>
+    <p class="sub">PlayStation Remote Play &middot; local network</p>
+  </header>
+
+  <div id="console-list" class="console-list">
+    <!-- populated by app.js -->
+  </div>
+
+  <div class="actions">
+    <button id="btn-add-manual" class="tv-btn" data-nav>Add console by IP</button>
+    <button id="btn-settings" class="tv-btn" data-nav>Settings</button>
+  </div>
+
+  <footer class="hints">
+    <span><i class="glyph cross small"></i> Select</span>
+    <span><i class="glyph pyramid small"></i> Wake</span>
+    <span><i class="glyph box small"></i> Pair</span>
+    <span><i class="glyph moon small"></i> Back</span>
+  </footer>
+</section>
+
+<!-- ======================= Pairing ======================= -->
+<section id="screen-regist" class="screen">
+  <h2>Pair with console</h2>
+  <p class="explain">
+    On your PlayStation: Settings &rsaquo; System &rsaquo; Remote Play &rsaquo;
+    Link Device, then enter the 8-digit code below.
+  </p>
+  <form id="regist-form" onsubmit="return false;">
+    <label>Console IP <input id="regist-host" class="tv-input" data-nav inputmode="numeric" placeholder="192.168.1.20"></label>
+    <label>Console type
+      <select id="regist-target" class="tv-input" data-nav>
+        <option value="ps5">PlayStation 5</option>
+        <option value="ps4">PlayStation 4 (&ge; 8.0)</option>
+      </select>
+    </label>
+    <label>PSN Account ID (base64) <input id="regist-account" class="tv-input" data-nav placeholder="from psn-account-id tool"></label>
+    <p id="regist-account-hint" class="field-hint"></p>
+    <label>Display name / PSN ID (optional) <input id="regist-label" class="tv-input" data-nav placeholder="e.g. your PSN handle"></label>
+    <label>Link code <input id="regist-pin" class="tv-input" data-nav inputmode="numeric" maxlength="8" placeholder="00000000"></label>
+    <div class="actions">
+      <button id="btn-regist-go" class="tv-btn primary" data-nav>Pair</button>
+      <button id="btn-regist-cancel" class="tv-btn" data-nav>Cancel</button>
+    </div>
+  </form>
+  <p id="regist-status" class="status" role="status"></p>
+</section>
+
+<!-- ======================= Settings ======================= -->
+<section id="screen-settings" class="screen">
+  <h2>Settings</h2>
+  <div class="settings-panel">
+    <label>Resolution
+      <select id="setting-resolution" class="tv-input" data-nav>
+        <option value="3">720p</option>
+        <option value="4">1080p</option>
+      </select>
+    </label>
+    <label>Frame rate
+      <select id="setting-fps" class="tv-input" data-nav>
+        <option value="30">30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+    </label>
+    <label>HDR (PS5 only &middot; experimental)
+      <select id="setting-hdr" class="tv-input" data-nav>
+        <option value="0">Off</option>
+        <option value="1">On — HEVC HDR10</option>
+      </select>
+    </label>
+    <label>PSN token (for remote play over the internet &middot; experimental)
+      <input id="setting-psn-token" class="tv-input" data-nav placeholder="paste PSN OAuth token">
+    </label>
+    <div class="actions">
+      <button id="btn-settings-save" class="tv-btn primary" data-nav>Save</button>
+      <button id="btn-settings-cancel" class="tv-btn" data-nav>Cancel</button>
+    </div>
+  </div>
+  <p id="settings-status" class="status" role="status"></p>
+</section>
+
+<!-- ======================= Stream ======================= -->
+<section id="screen-stream" class="screen">
+  <!-- EMSS renders onto this element in kMediaElement mode -->
+  <video id="stream-video" autoplay></video>
+  <div id="stream-overlay" class="stream-overlay">
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="stream-status">Connecting&hellip;</p>
+  </div>
+  <div id="login-pin-dialog" class="dialog hidden">
+    <h3>Console login PIN</h3>
+    <input id="login-pin" class="tv-input" data-nav inputmode="numeric" maxlength="4">
+    <button id="btn-login-pin" class="tv-btn primary" data-nav>Send</button>
+  </div>
+
+  <!-- Stream HUD: toggled by the yellow (C) remote key during streaming -->
+  <div id="stream-hud" class="hud hidden" role="dialog" aria-label="Stream stats">
+    <div class="hud-panel">
+      <h3>Stream stats</h3>
+      <dl class="hud-stats">
+        <dt>Resolution</dt><dd id="hud-res">&mdash;</dd>
+        <dt>Frame rate</dt><dd id="hud-fps">&mdash;</dd>
+        <dt>Bitrate</dt><dd id="hud-bitrate">&mdash;</dd>
+        <dt>HDR</dt><dd id="hud-hdr">&mdash;</dd>
+        <dt>Console IP</dt><dd id="hud-ip">&mdash;</dd>
+      </dl>
+      <div class="hud-actions">
+        <button id="hud-home" class="tv-btn primary" data-hud-nav>&#9673; PS button</button>
+        <button id="hud-close" class="tv-btn" data-hud-nav>Close</button>
+      </div>
+      <p class="hud-hint">C toggles this &middot; D-pad to move &middot; ✕/Enter to activate</p>
+    </div>
+  </div>
+</section>
+
+<!-- WASM module (Samsung Emscripten output), placed here by build.sh -->
+<script>
+  window.__ctModuleStatusQueue = [];
+  window.__ctDiagnostics = [];
+  // TEMPORARY: records a line into the persistent on-screen log exactly
+  // once per call site (see #ct-debug-log above). Previously __ctReport and
+  // __ctModuleStatus each pushed/rendered independently AND __ctReport also
+  // called __ctModuleStatus, so anything reported via __ctReport rendered
+  // as a single flickering status line while the full history was only
+  // ever shown once, in a 12-second-timeout snapshot that a fast crash
+  // could pre-empt entirely. Remove once diagnosed.
+  function __ctRecord(text) {
+    window.__ctDiagnostics.push(text);
+    // Was capped at 16, which a single pthread pool warm-up
+    // (PTHREAD_POOL_SIZE=16, each worker posting 2-3 messages) could exceed
+    // on its own, silently evicting every checkpoint from later in boot
+    // before anyone got to read them.
+    if (window.__ctDiagnostics.length > 500)
+      window.__ctDiagnostics.shift();
+    if (window.console && console.log)
+      console.log(text);
+    var logEl = document.getElementById('ct-debug-log');
+    if (logEl) {
+      // Only stick to the bottom if already there — otherwise this fights
+      // Channel Up/Down (see KEY.CHANNEL_UP/DOWN in app.js) every time a
+      // new line arrives while reading back through history.
+      var wasAtBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 20;
+      logEl.textContent = window.__ctDiagnostics.join('\n');
+      if (wasAtBottom)
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+  function __ctNotifyStatus(t) {
+    if (window.ChiakiTizen && window.ChiakiTizen._onModuleStatus)
+      window.ChiakiTizen._onModuleStatus(t);
+    else
+      window.__ctModuleStatusQueue.push(t);
+  }
+  window.__ctReport = function(kind, detail) {
+    var text = '[' + kind + '] ' + detail;
+    __ctRecord(text);
+    __ctNotifyStatus(text);
+  };
+  window.__ctModuleStatus = function(t) {
+    __ctRecord(t);
+    __ctNotifyStatus(t);
+  };
+  window.onerror = function(message, source, lineno, colno, error) {
+    if (!source && !lineno && !colno && message === 'Script error.')
+      return false;
+    var file = source ? source.split('/').pop() : 'script';
+    var where = file + ':' + (lineno || 0) + ':' + (colno || 0);
+    window.__ctReport('error', where + ' ' + message);
+    if (error && error.stack)
+      window.__ctReport('stack', String(error.stack).split('\n')[0]);
+    return false;
+  };
+  window.addEventListener('error', function(ev) {
+    if (!ev || ev.message)
+      return;
+    var target = ev.target || ev.srcElement;
+    var src = target && (target.src || target.href);
+    if (src)
+      window.__ctReport('resource', src.split('/').pop() + ' failed');
+  }, true);
+  window.onunhandledrejection = function(ev) {
+    var reason = ev && ev.reason;
+    window.__ctReport('promise', reason && reason.message ? reason.message : String(reason));
+  };
+  (function() {
+    var checks = [
+      'WebAssembly:' + (typeof WebAssembly !== 'undefined' ? 'yes' : 'no'),
+      'Worker:' + (typeof Worker !== 'undefined' ? 'yes' : 'no'),
+      'SharedArrayBuffer:' + (typeof SharedArrayBuffer !== 'undefined' ? 'yes' : 'no'),
+      'Atomics:' + (typeof Atomics !== 'undefined' ? 'yes' : 'no')
+    ];
+    window.__ctReport('preflight', checks.join(' '));
+  })();
+  var Module = {
+    print: function(t) {
+      console.log('[wasm]', t);
+      window.__ctModuleStatus(t);
+    },
+    printErr: function(t) {
+      console.log('[wasm!]', t);
+      window.__ctModuleStatus(t);
+    },
+    setStatus: window.__ctModuleStatus,
+    monitorRunDependencies: function(left) {
+      window.__ctModuleStatus(left ? ('Loading Chiaki core (' + left + ')') : 'Starting Chiaki core');
+    },
+    onAbort: function(t) {
+      window.__ctModuleStatus('Chiaki core failed: ' + t);
+    },
+    instantiateWasm: function(imports, receiveInstance) {
+      var wasmPath = Module.locateFile ? Module.locateFile('chiaki-tizen.wasm', 'wasm_modules/') : 'wasm_modules/chiaki-tizen.wasm';
+      window.__ctReport('wasm', 'xhr open ' + wasmPath);
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', wasmPath, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.onload = function() {
+        window.__ctReport('wasm', 'xhr load status ' + xhr.status + ' bytes ' +
+          (xhr.response ? xhr.response.byteLength : 0));
+        if (!(xhr.status === 200 || (xhr.status === 0 && xhr.response))) {
+          window.__ctReport('wasm', 'xhr failed status ' + xhr.status);
+          return;
+        }
+        window.__ctReport('wasm', 'instantiate begin');
+        WebAssembly.instantiate(xhr.response, imports).then(function(output) {
+          window.__ctReport('wasm', 'instantiate complete');
+          receiveInstance(output.instance, output.module);
+        }, function(err) {
+          window.__ctReport('wasm', 'instantiate failed ' +
+            (err && err.message ? err.message : String(err)));
+        });
+      };
+      xhr.onerror = function() {
+        window.__ctReport('wasm', 'xhr error');
+      };
+      xhr.ontimeout = function() {
+        window.__ctReport('wasm', 'xhr timeout');
+      };
+      xhr.timeout = 15000;
+      xhr.send(null);
+      return {};
+    },
+    locateFile: function(path, prefix) {
+      return prefix + path;
+    },
+    onRuntimeInitialized: function() {
+      Module.runtimeReady = true;
+      window.__ctModuleStatus('Chiaki core ready');
+      if (window.ChiakiTizen && window.ChiakiTizen._onModuleReady)
+        window.ChiakiTizen._onModuleReady();
+    }
+  };
+</script>
+<script src="js/tizen-socket-host-shim.js"
+  onload="window.__ctReport && window.__ctReport('loader', 'socket shim loaded')"
+  onerror="window.__ctReport && window.__ctReport('loader', 'socket shim failed to load')"></script>
+<script src="js/app.js"
+  onload="window.__ctReport && window.__ctReport('loader', 'app ui loaded')"
+  onerror="window.__ctReport && window.__ctReport('loader', 'app ui failed to load')"></script>
+<script src="js/psn-signaling.js"
+  onload="window.__ctReport && window.__ctReport('loader', 'psn signaling loaded')"
+  onerror="window.__ctReport && window.__ctReport('loader', 'psn signaling failed to load')"></script>
+<script src="wasm_modules/chiaki-tizen.js"
+  onload="window.__ctReport && window.__ctReport('loader', 'wasm loader script loaded')"
+  onerror="window.__ctReport && window.__ctReport('loader', 'wasm loader script failed to load'); window.ChiakiTizen && window.ChiakiTizen._onModuleLoadFailed && window.ChiakiTizen._onModuleLoadFailed()"></script>
+</body>
+</html>

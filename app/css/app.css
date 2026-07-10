@@ -1,0 +1,330 @@
+/* chiaki-tizen — 10-foot UI.
+ *
+ * Design intent: a living-room launcher, not a web page. Everything is sized
+ * for a 1080p canvas viewed from the couch; the D-pad focus ring is the
+ * primary interaction and gets the loudest treatment on screen. The visual
+ * language borrows the one thing every PlayStation owner already reads
+ * fluently: the four controller glyphs, drawn in CSS as the navigation hints
+ * and list markers. Palette is near-black slate with PlayStation's cold blue
+ * as the single accent — dark because the app's real content is a video
+ * stream and the chrome must disappear around it.
+ */
+
+:root {
+  --bg: #0b0e14;
+  --bg-2: #0e131d;
+  --panel: #141926;
+  --panel-hi: #1a2132;
+  --panel-edge: #232b3f;
+  --text: #e8ecf4;
+  --text-dim: #8a93a8;
+  --text-faint: #5c6478;
+  --accent: #2d6ff7;      /* PS cold blue */
+  --accent-hi: #4d87ff;
+  --accent-soft: rgba(45, 111, 247, 0.18);
+  --ready: #35c78f;
+  --standby: #e5a53a;
+  --glyph-pink: #f05a7e;  /* box */
+  --glyph-teal: #35bcc7;  /* pyramid */
+  --radius: 16px;
+  --radius-sm: 10px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 1920px; height: 1080px;
+  background:
+    radial-gradient(1400px 900px at 78% -8%, rgba(45,111,247,0.10), transparent 60%),
+    radial-gradient(1200px 800px at 0% 108%, rgba(53,199,143,0.06), transparent 55%),
+    var(--bg);
+  color: var(--text);
+  font-family: "SamsungOneUI", "Noto Sans", system-ui, sans-serif;
+  overflow: hidden;
+  cursor: none; /* remote-driven */
+  -webkit-font-smoothing: antialiased;
+}
+
+.screen { display: none; width: 100%; height: 100%; padding: 72px 120px; }
+.screen.active {
+  display: flex; flex-direction: column;
+  animation: screen-in 260ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+@keyframes screen-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.hidden { display: none !important; }
+
+/* ---------- splash ---------- */
+.app-splash {
+  position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 20;
+  width: 1920px; height: 1080px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: #063f9b url("../splash.png") center / cover no-repeat;
+  transition: opacity 240ms ease, visibility 240ms ease;
+}
+.app-splash.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.app-splash img { width: 128px; height: 128px; margin-bottom: 28px; }
+.app-splash p {
+  font-size: 48px; font-weight: 300; letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.app-splash .module-status {
+  margin-top: 22px; max-width: 920px; min-height: 30px;
+  color: rgba(232, 236, 244, 0.82); font-size: 24px; letter-spacing: 0;
+  text-align: center; text-transform: none;
+}
+
+/* ---------- masthead ---------- */
+.masthead {
+  margin-bottom: 44px; display: grid;
+  grid-template-columns: auto 1fr; grid-template-rows: auto auto;
+  column-gap: 28px; align-items: center;
+}
+.app-mark { width: 92px; height: 92px; grid-row: 1 / span 2; border-radius: 20px; }
+.masthead h1 {
+  font-size: 76px; font-weight: 200; letter-spacing: 0.1em;
+  text-transform: uppercase; line-height: 1;
+}
+.masthead .sub { font-size: 26px; color: var(--text-dim); margin-top: 8px; letter-spacing: 0.02em; }
+
+/* ---------- PlayStation glyphs (user artwork in app/icons/) ---------- */
+.glyph-row { display: flex; gap: 18px; margin-bottom: 20px; }
+.glyph {
+  display: inline-block; width: 30px; height: 30px; position: relative;
+  background: center / contain no-repeat; border: 0;
+}
+.glyph.small { width: 26px; height: 26px; vertical-align: -6px; margin-right: 10px; }
+.glyph.cross   { background-image: url("../icons/cross.png"); }
+.glyph.moon    { background-image: url("../icons/moon.png"); }
+.glyph.box     { background-image: url("../icons/box.png"); }
+.glyph.pyramid { background-image: url("../icons/pyramid.png"); }
+
+/* ---------- console list ---------- */
+.console-list {
+  flex: 1; display: flex; flex-direction: column; gap: 18px;
+  overflow-y: auto; padding-right: 8px;
+}
+.console-card {
+  display: flex; align-items: center; gap: 30px;
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+  border: 2px solid var(--panel-edge);
+  border-radius: var(--radius);
+  padding: 26px 34px;
+  font-size: 30px;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+/* console type badge (PS4 / PS5) */
+.cc-badge {
+  flex: 0 0 auto; min-width: 92px; text-align: center;
+  font-size: 24px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 12px 16px; border-radius: 12px;
+  border: 2px solid var(--panel-edge); color: var(--text-dim);
+  background: rgba(0,0,0,0.22);
+}
+.cc-badge.ps5 { color: var(--accent-hi); border-color: rgba(45,111,247,0.5); }
+.cc-badge.ps4 { color: var(--glyph-teal); border-color: rgba(53,188,199,0.4); }
+
+.cc-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.console-card .name {
+  font-weight: 600; font-size: 32px; line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.console-card .addr {
+  color: var(--text-dim); font-size: 23px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.console-card .cc-psn {
+  color: var(--accent-hi); font-size: 21px; letter-spacing: 0.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* delete button on saved cards (reached with the D-pad Right from a card) */
+.cc-del {
+  flex: 0 0 auto; width: 44px; height: 44px; border-radius: 10px;
+  font: inherit; font-size: 24px; line-height: 1;
+  color: var(--text-dim); background: rgba(0,0,0,0.22);
+  border: 2px solid var(--panel-edge);
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease, color 120ms ease, background 120ms ease;
+}
+.cc-del:focus, .cc-del.hud-nav-focus {
+  outline: none; color: var(--glyph-pink);
+  border-color: var(--glyph-pink); background: rgba(240,90,126,0.14);
+  box-shadow: 0 0 0 4px rgba(240,90,126,0.18), 0 0 26px rgba(240,90,126,0.35);
+  transform: scale(1.08);
+}
+
+.cc-tags { margin-left: auto; display: flex; align-items: center; gap: 22px; flex: 0 0 auto; }
+.cc-paired, .cc-pair-hint {
+  font-size: 20px; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 7px 14px; border-radius: 999px;
+}
+.cc-paired { color: var(--accent-hi); background: var(--accent-soft); }
+.cc-pair-hint { color: var(--text-faint); border: 1px dashed var(--panel-edge); }
+
+.console-card .state {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 21px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-dim);
+}
+.console-card .state::before {
+  content: ""; width: 12px; height: 12px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 10px currentColor;
+}
+.console-card .state.ready   { color: var(--ready); }
+.console-card .state.standby { color: var(--standby); }
+.console-card .state.unknown { color: var(--text-faint); }
+.console-card .state.unknown::before { box-shadow: none; }
+
+.empty-hint {
+  color: var(--text-dim); font-size: 26px; padding: 44px 0; line-height: 1.5;
+}
+.empty-hint.searching::before {
+  content: ""; display: inline-block; width: 16px; height: 16px; margin-right: 14px;
+  border-radius: 50%; background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite; vertical-align: middle;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.7); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+
+/* ---------- focus: the loudest element on screen ---------- */
+[data-nav]:focus, .console-card:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft), 0 0 34px rgba(45,111,247,0.4);
+  transform: scale(1.015);
+}
+.console-card:focus {
+  background: linear-gradient(180deg, #1d2740, #161d2e);
+}
+.tv-btn.primary:focus { box-shadow: 0 0 0 4px var(--accent-soft), 0 0 34px rgba(45,111,247,0.55); }
+@media (prefers-reduced-motion: reduce) {
+  .console-card, [data-nav] { transition: none; }
+  [data-nav]:focus, .console-card:focus { transform: none; }
+  .screen.active { animation: none; }
+}
+
+/* ---------- buttons / inputs ---------- */
+.actions { display: flex; gap: 24px; margin-top: 40px; }
+.tv-btn {
+  font: inherit; font-size: 26px; color: var(--text);
+  background: var(--panel-hi);
+  border: 2px solid var(--panel-edge);
+  border-radius: var(--radius-sm);
+  padding: 18px 42px;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+.tv-btn.primary {
+  background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.tv-input {
+  font: inherit; font-size: 28px; color: var(--text);
+  background: var(--panel);
+  border: 2px solid var(--panel-edge);
+  border-radius: var(--radius-sm);
+  padding: 16px 22px;
+  width: 560px;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+label { display: block; font-size: 23px; color: var(--text-dim); margin: 22px 0 8px; letter-spacing: 0.02em; }
+h2 { font-size: 52px; font-weight: 300; margin-bottom: 16px; letter-spacing: 0.01em; }
+.explain { font-size: 26px; color: var(--text-dim); max-width: 1040px; line-height: 1.55; }
+.status { margin-top: 28px; font-size: 26px; min-height: 34px; color: var(--text-dim); }
+.field-hint { font-size: 20px; color: var(--text-faint); margin: 4px 0 0; min-height: 24px; }
+.status.err { color: var(--glyph-pink); }
+.status.ok { color: var(--ready); }
+
+/* ---------- forms (pairing / settings share the same column) ---------- */
+#regist-form, .settings-panel {
+  display: flex; flex-direction: column;
+  width: 720px; margin-top: 12px;
+}
+.settings-panel .tv-input,
+#regist-target { width: 360px; }
+
+/* ---------- hints footer ---------- */
+.hints {
+  display: flex; gap: 52px; margin-top: 44px; padding-top: 30px;
+  border-top: 1px solid var(--panel-edge);
+  font-size: 23px; color: var(--text-dim);
+}
+.hints span { display: inline-flex; align-items: center; }
+
+/* ---------- stream ---------- */
+#screen-stream { padding: 0; position: relative; overflow: hidden; background: #000; }
+#stream-video {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 0;
+  display: block; width: 100%; height: 100%;
+  object-fit: contain; background: #000;
+}
+.stream-overlay {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  width: 100%; height: 100%; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 34px;
+  background: radial-gradient(1200px 800px at 50% 45%, rgba(11,14,20,0.78), rgba(6,8,12,0.95));
+  font-size: 34px; letter-spacing: 0.04em; color: var(--text);
+}
+.stream-overlay.hidden, .dialog.hidden { display: none; }
+.spinner {
+  width: 76px; height: 76px; border-radius: 50%;
+  border: 5px solid rgba(255,255,255,0.14);
+  border-top-color: var(--accent-hi);
+  animation: spin 900ms linear infinite;
+}
+.stream-overlay.error .spinner { display: none; }
+.stream-overlay.error #stream-status { color: var(--glyph-pink); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.dialog {
+  position: absolute; left: 50%; top: 50%; z-index: 3; transform: translate(-50%, -50%);
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+  border: 2px solid var(--panel-edge);
+  border-radius: 20px; padding: 48px 56px; text-align: center;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+}
+.dialog h3 { font-size: 34px; font-weight: 400; margin-bottom: 26px; }
+.dialog .tv-input { width: 260px; text-align: center; letter-spacing: 0.4em; }
+.dialog .tv-btn { margin-top: 26px; }
+
+/* ---------- stream HUD ---------- */
+.hud {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  width: 100%; height: 100%; z-index: 4;
+  display: flex; align-items: flex-start; justify-content: flex-start;
+  padding: 64px; pointer-events: none;
+}
+.hud.hidden { display: none; }
+.hud-panel {
+  pointer-events: auto; min-width: 440px;
+  background: linear-gradient(180deg, rgba(20,25,38,0.92), rgba(11,14,20,0.92));
+  border: 2px solid var(--panel-edge); border-radius: var(--radius);
+  padding: 32px 36px; box-shadow: 0 24px 70px rgba(0,0,0,0.55);
+}
+.hud-panel h3 {
+  font-size: 30px; font-weight: 400; margin-bottom: 22px;
+  letter-spacing: 0.04em; color: var(--text);
+}
+.hud-stats {
+  display: grid; grid-template-columns: auto 1fr; gap: 12px 28px;
+  font-size: 26px; margin-bottom: 26px;
+}
+.hud-stats dt { color: var(--text-dim); }
+.hud-stats dd { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.hud-stats dd.ok { color: var(--ready); }
+.hud-stats dd.off { color: var(--text-faint); }
+.hud-actions { display: flex; gap: 18px; }
+.hud-actions .tv-btn { font-size: 24px; padding: 14px 28px; }
+.hud-nav-focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft), 0 0 30px rgba(45,111,247,0.45);
+  transform: scale(1.03);
+}
+.hud-hint { margin-top: 20px; font-size: 20px; color: var(--text-faint); }

@@ -1,0 +1,17 @@
+.DS_Store
+
+# Personal/local packaging inputs
+/app/prefill.json
+/app/*.wgt
+
+# Generated app bundles and build output
+/app/wasm_modules/
+/dist/
+/wasm/build/
+
+# Local upstream checkout; clone chiaki-ng separately or set CHIAKI_NG_ROOT.
+/external/
+
+# Native spike build outputs
+/wasm/spikes/**/*.a
+/wasm/spikes/**/*_test

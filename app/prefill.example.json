@@ -1,0 +1,18 @@
+{
+  "_comment": "Rename this file to prefill.json and drop it in app/ before packaging to pre-seed a personal build. Applied once per install. Leave it out (or leave it named .example.json) for a generic build. An entry with registKeyB64 + rpKeyB64 becomes a ready-to-stream console; an entry with only host/accountId/ps5 shows as unpaired so you just enter the 8-digit link code once.",
+
+  "consoles": [
+    {
+      "host": "192.168.1.100",
+      "ps5": true,
+      "accountId": "YOUR_PSN_ACCOUNT_ID_BASE64",
+      "label": "Main",
+      "registKeyB64": "",
+      "rpKeyB64": ""
+    }
+  ],
+
+  "psnAccountId": "YOUR_PSN_ACCOUNT_ID_BASE64",
+  "psnToken": "",
+  "settings": { "resolution": 4, "fps": 60, "hdr": false }
+}

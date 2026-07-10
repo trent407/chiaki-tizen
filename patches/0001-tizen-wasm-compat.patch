@@ -1,0 +1,82 @@
+diff --git a/lib/include/chiaki/stoppipe.h b/lib/include/chiaki/stoppipe.h
+index 8011794..7367252 100644
+--- a/lib/include/chiaki/stoppipe.h
++++ b/lib/include/chiaki/stoppipe.h
+@@ -23,7 +23,7 @@ typedef struct chiaki_stop_pipe_t
+ {
+ #ifdef _WIN32
+ 	WSAEVENT event;
+-#elif defined(__SWITCH__)
++#elif defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	// due to a lack pipe/event/socketpair
+ 	// on switch env, we use a physical socket
+ 	// to send/trigger the cancel signal
+diff --git a/lib/src/sock.c b/lib/src/sock.c
+index b126bc2..c1e44a9 100644
+--- a/lib/src/sock.c
++++ b/lib/src/sock.c
+@@ -9,6 +9,15 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_socket_set_nonblock(chiaki_socket_t sock, b
+ 	u_long nbio = nonblock ? 1 : 0;
+ 	if(ioctlsocket(sock, FIONBIO, &nbio) != NO_ERROR)
+ 		return CHIAKI_ERR_UNKNOWN;
++#elif defined(CHIAKI_TIZEN_WASM)
++	// Tizen Sockets Extension does not implement fcntl().
++	// Sockets are created with SOCK_NONBLOCK via the socket() wrapper in
++	// tizen_compat.h, so a request for nonblock is already satisfied and a
++	// request to switch back to blocking cannot be honored. Callers in
++	// chiaki always guard blocking-style reads with stop-pipe select, so
++	// treating this as success is safe in practice.
++	(void)sock;
++	(void)nonblock;
+ #else
+ 	int flags = fcntl(sock, F_GETFL, 0);
+ 	if(flags == -1)
+diff --git a/lib/src/stoppipe.c b/lib/src/stoppipe.c
+index 697f061..ce7a1aa 100644
+--- a/lib/src/stoppipe.c
++++ b/lib/src/stoppipe.c
+@@ -19,7 +19,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_init(ChiakiStopPipe *stop_pipe)
+ 	stop_pipe->event = WSACreateEvent();
+ 	if(stop_pipe->event == WSA_INVALID_EVENT)
+ 		return CHIAKI_ERR_UNKNOWN;
+-#elif defined(__SWITCH__)
++#elif defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	// currently pipe or socketpare are not available on switch
+ 	// use a custom udp socket as pipe
+ 
+@@ -63,7 +63,7 @@ CHIAKI_EXPORT void chiaki_stop_pipe_fini(ChiakiStopPipe *stop_pipe)
+ {
+ #ifdef _WIN32
+ 	WSACloseEvent(stop_pipe->event);
+-#elif defined(__SWITCH__)
++#elif defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	close(stop_pipe->fd);
+ #else
+ 	close(stop_pipe->fds[0]);
+@@ -75,7 +75,7 @@ CHIAKI_EXPORT void chiaki_stop_pipe_stop(ChiakiStopPipe *stop_pipe)
+ {
+ #ifdef _WIN32
+ 	WSASetEvent(stop_pipe->event);
+-#elif defined(__SWITCH__)
++#elif defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	// send to local socket (FIXME MSG_CONFIRM)
+ 	sendto(stop_pipe->fd, "\x00", 1, 0,
+ 		(struct sockaddr*)&stop_pipe->addr, sizeof(struct sockaddr_in));
+@@ -119,7 +119,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_select_single(ChiakiStopPipe *sto
+ #else
+ 	fd_set rfds;
+ 	FD_ZERO(&rfds);
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	// push udp local socket as fd
+ 	int stop_fd = stop_pipe->fd;
+ #else
+@@ -260,7 +260,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stop_pipe_reset(ChiakiStopPipe *stop_pipe)
+ #ifdef _WIN32
+ 	BOOL r = WSAResetEvent(stop_pipe->event);
+ 	return r ? CHIAKI_ERR_SUCCESS : CHIAKI_ERR_UNKNOWN;
+-#elif defined(__SWITCH__)
++#elif defined(__SWITCH__) || defined(CHIAKI_TIZEN_WASM)
+ 	//FIXME
+ 	uint8_t v;
+ 	int r;

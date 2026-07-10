@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets"
+        xmlns:tizen="http://tizen.org/ns/widgets"
+        id="http://chiaki-tizen.example/chiaki-tizen"
+        version="0.1.0" viewmodes="maximized">
+    <tizen:application id="ChIaKiTiZ0.ChiakiTizen" package="ChIaKiTiZ0" required_version="5.5"/>
+    <content src="index.html"/>
+    <feature name="http://tizen.org/feature/screen.size.all"/>
+    <icon src="icon.png"/>
+    <name>Chiaki for Tizen</name>
+    <description>Open-source PlayStation Remote Play client (chiaki-ng port)</description>
+
+    <!-- Raw TCP/UDP via Tizen Sockets Extension + local network discovery -->
+    <tizen:privilege name="http://tizen.org/privilege/internet"/>
+    <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
+    <!-- Register TV remote keys beyond the default set -->
+    <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+
+    <!-- WARP: allow the JS signaling layer (fetch) to reach Sony's PSN REST
+         endpoints for over-the-internet Remote Play. A packaged Tizen app with
+         these access grants + the internet privilege is not bound by web-page
+         CORS (same mechanism Samsung's Moonlight port uses). The push WebSocket
+         is opened from WASM/mbedTLS over a raw socket, so it isn't governed by
+         WARP. Scoped to the specific PSN hosts rather than "*". -->
+    <access origin="https://web.np.playstation.com" subdomains="true"/>
+    <access origin="https://mobile-pushcl.np.communication.playstation.net" subdomains="true"/>
+    <access origin="https://asm.np.community.playstation.net" subdomains="true"/>
+    <access origin="https://auth.api.sonyentertainmentnetwork.com" subdomains="true"/>
+    <access origin="https://ca.account.sony.com" subdomains="true"/>
+
+    <tizen:profile name="tv-samsung"/>
+    <tizen:setting screen-orientation="landscape"
+                   context-menu="disable"
+                   background-support="disable"
+                   encryption="disable"
+                   install-location="auto"
+                   hwkey-event="enable"/>
+    <!-- Keep the screensaver off while streaming -->
+    <tizen:setting screen-saver="disable"/>
+</widget>

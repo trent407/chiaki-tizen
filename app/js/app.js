@@ -734,10 +734,18 @@ function storageSummary() {
   ].join(' ');
 }
 
-function appendSystemInfo(reportLines, render) {
+function appendSystemInfo(reportLines, render, done) {
+  function complete() {
+    if (done && !complete.done) {
+      complete.done = true;
+      done();
+    }
+  }
+
   if (!(window.tizen && tizen.systeminfo)) {
     reportLines.push('tizen.systeminfo: unavailable');
     render();
+    complete();
     return;
   }
 
@@ -759,25 +767,61 @@ function appendSystemInfo(reportLines, render) {
   });
   render();
 
+  var pending = 0;
   ['BUILD', 'DISPLAY', 'NETWORK', 'WIFI_NETWORK', 'ETHERNET_NETWORK'].forEach(function(prop) {
     try {
+      pending++;
       tizen.systeminfo.getPropertyValue(prop, function(info) {
         reportLines.push('systeminfo ' + prop + '=' + simpleObjectSummary(info));
         render();
+        if (--pending === 0) complete();
       }, function(err) {
         reportLines.push('systeminfo ' + prop + '=unavailable' +
           (err && err.name ? ' (' + err.name + ')' : ''));
         render();
+        if (--pending === 0) complete();
       });
     } catch (e) {
       reportLines.push('systeminfo ' + prop + '=unavailable');
       render();
+      pending--;
     }
   });
+  if (pending > 0)
+    setTimeout(complete, 1200);
+  else
+    complete();
+}
+
+function sendDebugReportText(report, status) {
+  if (navigator.share) {
+    navigator.share({ title: 'Chiaki for Tizen debug report', text: report }).then(function() {
+      status.textContent = 'Debug report shared.';
+      status.className = 'status ok';
+    }, function() {
+      status.textContent = 'Debug report shown below.';
+      status.className = 'status ok';
+    });
+    return;
+  }
+
+  var body = encodeURIComponent(report.slice(0, 6000));
+  var url = 'https://github.com/trent407/chiaki-tizen/issues/new?title=' +
+    encodeURIComponent('TV debug report') + '&body=' + body;
+  try {
+    status.textContent = 'Opening issue page; report also shown below.';
+    status.className = 'status ok';
+    var w = window.open(url, '_blank');
+    if (!w) location.href = url;
+  } catch (e) {
+    status.textContent = 'Debug report shown below.';
+    status.className = 'status ok';
+  }
 }
 
 function showDebugReport() {
   var reportEl = document.getElementById('debug-report');
+  var status = document.getElementById('settings-status');
   var settings = loadStreamSettings();
   var lines = [
     'Chiaki for Tizen debug report',
@@ -815,12 +859,14 @@ function showDebugReport() {
   }
 
   reportEl.classList.remove('hidden');
+  status.textContent = 'Collecting debug report...';
+  status.className = 'status';
   render();
-  appendSystemInfo(lines, render);
+  appendSystemInfo(lines, render, function() {
+    render();
+    sendDebugReportText(reportEl.value, status);
+  });
   reportEl.focus();
-  var status = document.getElementById('settings-status');
-  status.textContent = 'Debug report generated.';
-  status.className = 'status ok';
 }
 
 function resetSavedData() {

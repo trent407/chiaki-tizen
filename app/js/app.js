@@ -30,6 +30,58 @@ var KEY = {
 
 var C = null; // ccall shorthands, filled when the module is ready
 
+function samsungTvYearFromModel(text) {
+  text = String(text || '').toUpperCase();
+  // Common Samsung TV codes: T=2020, A=2021, B=2022, C=2023, D=2024,
+  // F=2025. Examples: QN90C, S95D, LS03A, TU7000.
+  var m = text.match(/\b(?:QN|QE|QA|UN|UE|UA|GU|GQ)?\d{2,3}(?:QN|Q|S|LST|LS)\d{2,4}(T|A|B|C|D|F)(?=\d|[A-Z]|$)/);
+  if (!m)
+    m = text.match(/\b(?:QN|QE|QA|UN|UE|UA|GU|GQ|KU|KD)?\d{2,3}[A-Z]*?(T|A|B|C|D|F)(?=\d|[A-Z]|$)/);
+  if (!m)
+    m = text.match(/\b(?:LST|LS|Q[A-Z]?|S)\d{2,3}(T|A|B|C|D|F)(?=\d|[A-Z]|$)/);
+  if (!m)
+    return null;
+  var years = { T: 2020, A: 2021, B: 2022, C: 2023, D: 2024, F: 2025 };
+  return years[m[1]] || null;
+}
+
+function detectTvModelYear() {
+  var bits = [];
+  if (window.tizen && tizen.systeminfo) {
+    [
+      'http://tizen.org/system/model_name',
+      'http://tizen.org/system/model',
+      'http://tizen.org/system/build.string'
+    ].forEach(function(key) {
+      try {
+        var val = tizen.systeminfo.getCapability(key);
+        if (val) bits.push(val);
+      } catch (e) {}
+    });
+  }
+  bits.push(navigator.userAgent || '');
+  for (var i = 0; i < bits.length; i++) {
+    var year = samsungTvYearFromModel(bits[i]);
+    if (year) return year;
+  }
+  return null;
+}
+
+function applyAutoPerformanceUi() {
+  var year = detectTvModelYear();
+  state.tvModelYear = year;
+  // Keep the fast UI for unknown/older sets. Only restore richer effects when
+  // the model is confidently 2024+.
+  if (year && year >= 2024)
+    document.body.classList.remove('perf-ui');
+  else
+    document.body.classList.add('perf-ui');
+  if (window.__ctReport)
+    window.__ctReport('ui', 'performance mode ' +
+      (document.body.classList.contains('perf-ui') ? 'on' : 'off') +
+      (year ? ' tvYear=' + year : ' tvYear=unknown'));
+}
+
 var state = {
   moduleReady: false,
   moduleFailed: false,
@@ -39,10 +91,13 @@ var state = {
   discovered: {},        // hostId -> discovery info
   consoleListSignature: '',
   consoleListRenderTimer: null,
+  tvModelYear: null,
   registTargetHost: null,
   gamepadTimer: null,
   remoteButtons: 0       // buttons held via TV remote during stream
 };
+
+applyAutoPerformanceUi();
 
 // ---------------------------------------------------------------------------
 // Persistence (localStorage is fully supported in Tizen web apps)
@@ -1005,6 +1060,8 @@ function showDebugReport() {
       ' devicePixelRatio=' + (window.devicePixelRatio || 1),
     'moduleReady=' + state.moduleReady + ' moduleFailed=' + state.moduleFailed +
       ' screen=' + state.screen + ' streaming=' + state.streaming,
+    'ui performanceMode=' + document.body.classList.contains('perf-ui') +
+      ' tvModelYear=' + (state.tvModelYear || 'unknown'),
     'settings resolutionPreset=' + settings.resolution + ' fps=' + settings.fps +
       ' hdr=' + settings.hdr,
     'storage ' + storageSummary()

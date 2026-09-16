@@ -277,7 +277,7 @@ void EmssPlayer::Stop()
 	source_.Close([](samsung::wasm::OperationResult) {});
 }
 
-bool EmssPlayer::PushVideoAccessUnit(const uint8_t *buf, size_t buf_size)
+bool EmssPlayer::PushVideoAccessUnit(const uint8_t *buf, size_t buf_size, int32_t frames_lost)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	if(!running_)
@@ -303,9 +303,34 @@ bool EmssPlayer::PushVideoAccessUnit(const uint8_t *buf, size_t buf_size)
 			return true;
 		}
 		if(!key)
+		{
+			// TEMPORARY: Tizen 9 FEC-failure debugging. Only log a re-wait
+			// mid-stream (video_frame_index_ > 0) — every stream hits this
+			// once at startup before the first IDR, which is routine, not a
+			// failure. A mid-stream re-wait means seen_key_frame_ got reset
+			// (OnTrackClosed/OnSessionIdChanged) after we were already
+			// playing, which would masquerade as sustained video loss even
+			// though its root cause is player-side, not network loss.
+			if(video_frame_index_ > 0)
+				std::fprintf(stderr,
+					"[emss] mid-stream re-wait for IDR at frame %llu (track_open=%d)\n",
+					static_cast<unsigned long long>(video_frame_index_), video_track_open_ ? 1 : 0);
 			return false; // ask chiaki for an IDR; decoder must start on one
+		}
 		seen_key_frame_ = true;
+		// Loss counted before the stream has actually started presenting
+		// isn't meaningful — the clock begins fresh at this key frame.
+		frames_lost = 0;
 	}
+
+	// chiaki reports frames dropped immediately before this one; fold that
+	// gap into the frame-count clock so video's PTS keeps pace with real
+	// elapsed time. Without this, video_frame_index_ only counts frames we
+	// actually appended, so every loss permanently shifts video's clock
+	// behind audio's (audio_sample_index_ in PushAudioPcm isn't subject to
+	// the same gap) — the likely cause of audio drifting ahead over time.
+	if(frames_lost > 0)
+		video_frame_index_ += static_cast<uint64_t>(frames_lost);
 
 	double const frame_duration = 1.0 / static_cast<double>(video_config_.fps);
 	double const pts = static_cast<double>(video_frame_index_) * frame_duration;
@@ -343,9 +368,16 @@ bool EmssPlayer::PushVideoAccessUnit(const uint8_t *buf, size_t buf_size)
 	auto append_result = video_track_.AppendPacket(pkt);
 	if(!append_result)
 	{
-		std::fprintf(stderr, "[emss] video AppendPacket failed at frame %llu op=%d\n",
+		// TEMPORARY: Tizen 9 FEC-failure debugging — extra fields distinguish
+		// a real player-side rejection from packets that never reached the
+		// player because chiaki dropped them at the network/FEC layer first.
+		std::fprintf(stderr,
+			"[emss] video AppendPacket failed at frame %llu op=%d "
+			"seen_key_frame=%d video_track_open=%d session_valid=%d\n",
 			static_cast<unsigned long long>(video_frame_index_),
-			static_cast<int>(append_result.operation_result));
+			static_cast<int>(append_result.operation_result),
+			seen_key_frame_ ? 1 : 0, video_track_open_ ? 1 : 0,
+			video_session_id_ != samsung::wasm::kIgnoreSessionId ? 1 : 0);
 		return false;
 	}
 	video_frame_index_++;
@@ -497,11 +529,34 @@ void EmssPlayer::OnTrackOpen()
 		static_cast<int>(audio_mode.operation_result));
 }
 
-void EmssPlayer::OnTrackClosed(ElementaryMediaTrack::CloseReason)
+void EmssPlayer::OnTrackClosed(ElementaryMediaTrack::CloseReason reason)
 {
-	std::lock_guard<std::mutex> lock(mutex_);
-	RefreshTrackOpenState();
-	seen_key_frame_ = false;
+	uint64_t frame_index_at_close;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		frame_index_at_close = video_frame_index_;
+		RefreshTrackOpenState();
+		seen_key_frame_ = false;
+	}
+
+	// TEMPORARY: Tizen 9 FEC-failure debugging. frame_index_at_close tells a
+	// routine end-of-session close (0, nothing streamed yet) apart from an
+	// unexpected mid-stream close (>0) — the latter would force a fresh IDR
+	// wait (see PushVideoAccessUnit) that could look like sustained video
+	// loss even though it originates here, not on the network.
+	const char *reason_name = "unknown";
+	switch(reason)
+	{
+		case ElementaryMediaTrack::CloseReason::kSourceClosed: reason_name = "kSourceClosed"; break;
+		case ElementaryMediaTrack::CloseReason::kSourceError: reason_name = "kSourceError"; break;
+		case ElementaryMediaTrack::CloseReason::kSourceDetached: reason_name = "kSourceDetached"; break;
+		case ElementaryMediaTrack::CloseReason::kTrackDisabled: reason_name = "kTrackDisabled"; break;
+		case ElementaryMediaTrack::CloseReason::kTrackEnded: reason_name = "kTrackEnded"; break;
+		default: break;
+	}
+	std::fprintf(stderr, "[emss] track closed, reason=%s (%d) video_frame_index=%llu\n",
+		reason_name, static_cast<int>(reason),
+		static_cast<unsigned long long>(frame_index_at_close));
 }
 
 void EmssPlayer::OnSessionIdChanged(samsung::wasm::SessionId session_id)

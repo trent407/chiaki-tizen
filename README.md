@@ -101,6 +101,19 @@ This is how every chiaki API call in this port was verified.
 4. Connect a controller — see "Controller setup" below. The TV remote works
    for menus (color keys map to △○✕□).
 
+### Debug reports and saved data
+
+- Press the **Blue** remote key to open the on-screen debug log. If the app is
+  stuck on the splash/blue screen, press **Blue**, then **Enter** on **Send
+  debug**. The report redacts IPs and token-like strings, and also stays visible
+  on screen if the TV cannot open a share/issue flow.
+- Settings includes **Debug report** for the same redacted report from the
+  normal UI.
+- Settings also includes **Reset saved data**. Press it twice to clear saved
+  consoles, pairing keys, PSN token, and stream settings. This is useful after
+  reinstalling through a source that uses the same Tizen app id, because some
+  TVs preserve app web storage across uninstall/reinstall.
+
 ## Controller setup
 
 Two ways to use a DualShock 4 / DualSense, and the choice matters:

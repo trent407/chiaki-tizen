@@ -165,15 +165,21 @@ function hideSplash() {
 function setModuleStatus(text, failed) {
   state.moduleStatus = text || state.moduleStatus;
   if (failed) state.moduleFailed = true;
-  var splash = document.getElementById('app-splash');
-  if (splash) {
-    var el = splash.querySelector('.module-status');
-    if (!el) {
-      el = document.createElement('p');
-      el.className = 'module-status';
-      splash.appendChild(el);
+  // Only surface something on the splash for a genuine failure. Routine boot
+  // chatter (preflight checks, xhr/instantiate progress, pthread pool
+  // counts, etc.) still lands in #ct-debug-log (Blue key) for diagnostics,
+  // but shouldn't flash under the title on every normal, successful boot.
+  if (failed) {
+    var splash = document.getElementById('app-splash');
+    if (splash) {
+      var el = splash.querySelector('.module-status');
+      if (!el) {
+        el = document.createElement('p');
+        el.className = 'module-status';
+        splash.appendChild(el);
+      }
+      el.textContent = state.moduleStatus;
     }
-    el.textContent = state.moduleStatus;
   }
   var status = document.getElementById('regist-status');
   if (status && state.screen === 'regist' && !state.moduleReady) {
@@ -644,7 +650,10 @@ function onRegistFinished(ev) {
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
+var resetDataArmedUntil = 0;
+
 function openSettings() {
+  resetDataArmedUntil = 0;
   var settings = loadStreamSettings();
   document.getElementById('setting-resolution').value = String(settings.resolution);
   document.getElementById('setting-fps').value = String(settings.fps);
@@ -652,6 +661,7 @@ function openSettings() {
   var tokenEl = document.getElementById('setting-psn-token');
   if (tokenEl && window.ChiakiPSN)
     tokenEl.value = window.ChiakiPSN.loadToken() || '';
+  document.getElementById('debug-report').classList.add('hidden');
   document.getElementById('settings-status').textContent = '';
   show('settings');
 }
@@ -672,6 +682,178 @@ function saveSettings() {
   status.textContent = 'Saved.';
   status.className = 'status ok';
   setTimeout(function() { show('consoles'); renderConsoleList(); }, 500);
+}
+
+function redactDebugText(text) {
+  return String(text == null ? '' : text)
+    .replace(/\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b/g, '$1.x')
+    .replace(/\b[A-Za-z0-9+/]{28,}={0,2}\b/g, '<redacted-token>');
+}
+
+function simpleObjectSummary(obj) {
+  if (!obj) return 'unavailable';
+  var out = {};
+  var keys = [];
+  try { keys = Object.keys(obj); } catch (e) {}
+  [
+    'model', 'manufacturer', 'buildVersion', 'name', 'version',
+    'resolutionWidth', 'resolutionHeight', 'dotsPerInchWidth', 'dotsPerInchHeight',
+    'physicalWidth', 'physicalHeight', 'networkType', 'ipAddress', 'ipv6Address',
+    'macAddress', 'ssid', 'status', 'cable'
+  ].forEach(function(k) {
+    if (keys.indexOf(k) < 0) keys.push(k);
+  });
+  keys.forEach(function(k) {
+    var v;
+    try { v = obj[k]; } catch (e) { return; }
+    if (v == null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+      out[k] = v;
+  });
+  try { return redactDebugText(JSON.stringify(out)); }
+  catch (e) { return 'unavailable'; }
+}
+
+function storageSummary() {
+  var consoles = loadConsoles();
+  var paired = 0, ps5 = 0, ps4 = 0;
+  consoles.forEach(function(c) {
+    if (c.registKeyB64 && c.rpKeyB64) paired++;
+    if (c.ps5) ps5++; else ps4++;
+  });
+  var keys = [];
+  try {
+    for (var i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+  } catch (e) {}
+  keys.sort();
+  return [
+    'savedConsoles=' + consoles.length,
+    'paired=' + paired,
+    'ps5=' + ps5,
+    'ps4=' + ps4,
+    'localStorageKeys=' + keys.join(',')
+  ].join(' ');
+}
+
+function appendSystemInfo(reportLines, render) {
+  if (!(window.tizen && tizen.systeminfo)) {
+    reportLines.push('tizen.systeminfo: unavailable');
+    render();
+    return;
+  }
+
+  var caps = [
+    'http://tizen.org/system/model_name',
+    'http://tizen.org/system/manufacturer',
+    'http://tizen.org/system/platform.name',
+    'http://tizen.org/system/platform.version',
+    'http://tizen.org/system/build.string',
+    'http://tizen.org/feature/platform.version',
+    'http://tizen.org/feature/network.wifi',
+    'http://tizen.org/feature/network.ethernet'
+  ];
+  caps.forEach(function(key) {
+    try {
+      var val = tizen.systeminfo.getCapability(key);
+      if (val != null) reportLines.push('capability ' + key + '=' + redactDebugText(val));
+    } catch (e) {}
+  });
+  render();
+
+  ['BUILD', 'DISPLAY', 'NETWORK', 'WIFI_NETWORK', 'ETHERNET_NETWORK'].forEach(function(prop) {
+    try {
+      tizen.systeminfo.getPropertyValue(prop, function(info) {
+        reportLines.push('systeminfo ' + prop + '=' + simpleObjectSummary(info));
+        render();
+      }, function(err) {
+        reportLines.push('systeminfo ' + prop + '=unavailable' +
+          (err && err.name ? ' (' + err.name + ')' : ''));
+        render();
+      });
+    } catch (e) {
+      reportLines.push('systeminfo ' + prop + '=unavailable');
+      render();
+    }
+  });
+}
+
+function showDebugReport() {
+  var reportEl = document.getElementById('debug-report');
+  var settings = loadStreamSettings();
+  var lines = [
+    'Chiaki for Tizen debug report',
+    'generated=' + new Date().toISOString(),
+    'location=' + redactDebugText(location.href),
+    'userAgent=' + redactDebugText(navigator.userAgent || ''),
+    'screen=' + screen.width + 'x' + screen.height +
+      ' devicePixelRatio=' + (window.devicePixelRatio || 1),
+    'moduleReady=' + state.moduleReady + ' moduleFailed=' + state.moduleFailed +
+      ' screen=' + state.screen + ' streaming=' + state.streaming,
+    'settings resolutionPreset=' + settings.resolution + ' fps=' + settings.fps +
+      ' hdr=' + settings.hdr,
+    'storage ' + storageSummary()
+  ];
+
+  try {
+    if (window.tizen && tizen.application) {
+      var app = tizen.application.getCurrentApplication();
+      if (app && app.appInfo)
+        lines.push('appInfo=' + simpleObjectSummary(app.appInfo));
+    }
+  } catch (e) {}
+
+  lines.push('diagnosticsTail:');
+  if (window.__ctDiagnostics && window.__ctDiagnostics.length) {
+    window.__ctDiagnostics.slice(-80).forEach(function(line) {
+      lines.push(redactDebugText(line));
+    });
+  } else {
+    lines.push('(none)');
+  }
+
+  function render() {
+    reportEl.value = lines.join('\n');
+  }
+
+  reportEl.classList.remove('hidden');
+  render();
+  appendSystemInfo(lines, render);
+  reportEl.focus();
+  var status = document.getElementById('settings-status');
+  status.textContent = 'Debug report generated.';
+  status.className = 'status ok';
+}
+
+function resetSavedData() {
+  var status = document.getElementById('settings-status');
+  var now = Date.now();
+  if (now > resetDataArmedUntil) {
+    resetDataArmedUntil = now + 6000;
+    status.textContent = 'Press Reset saved data again to clear consoles, pairing keys, token and settings.';
+    status.className = 'status err';
+    return;
+  }
+
+  try {
+    localStorage.clear();
+    // Prevent a bundled personal prefill.json from immediately rehydrating
+    // data after an intentional privacy reset.
+    localStorage.setItem('prefillApplied', '1');
+  } catch (e) {}
+  resetDataArmedUntil = 0;
+  state.discovered = {};
+  state.currentHost = null;
+  state.lastStats = null;
+  document.getElementById('setting-resolution').value = '3';
+  document.getElementById('setting-fps').value = '30';
+  document.getElementById('setting-hdr').value = '0';
+  document.getElementById('setting-psn-token').value = '';
+  document.getElementById('debug-report').classList.add('hidden');
+  if (window.ChiakiPSN && window.ChiakiPSN.loadToken)
+    window.ChiakiPSN.loadToken();
+  renderConsoleList();
+  restartDiscovery();
+  status.textContent = 'Saved data cleared.';
+  status.className = 'status ok';
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1237,8 @@ document.getElementById('btn-regist-cancel').addEventListener('click', function(
   show('consoles');
 });
 document.getElementById('btn-settings-save').addEventListener('click', saveSettings);
+document.getElementById('btn-debug-report').addEventListener('click', showDebugReport);
+document.getElementById('btn-reset-data').addEventListener('click', resetSavedData);
 document.getElementById('btn-settings-cancel').addEventListener('click', function() {
   show('consoles');
 });

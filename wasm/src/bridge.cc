@@ -248,6 +248,12 @@ void LogCb(ChiakiLogLevel level, const char *msg, void *user)
 		std::strstr(msg, "Takion dropping data with seq num") ||
 		std::strstr(msg, "Detected missing or corrupt frame") ||
 		std::strstr(msg, "StreamConnection reporting corrupt frame") ||
+		std::strstr(msg, "Missing unit") ||
+		std::strstr(msg, "Video FEC failure") ||
+		std::strstr(msg, "Failed to complete frame") ||
+		std::strstr(msg, "Video receiver could not flush frame") ||
+		std::strstr(msg, "Frame Processor received") ||
+		std::strstr(msg, "FEC failed") ||
 		std::strstr(msg, "Clamping reported packet loss") ||
 		std::strstr(msg, "Requested key stream for key pos") ||
 		std::strstr(msg, "Already requested a higher key pos") ||
@@ -300,7 +306,7 @@ bool VideoSampleCb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool fram
 	// Returning false makes chiaki report frame corruption and request an
 	// IDR frame from the console — exactly what we want both before the
 	// first key frame and after an append failure.
-	bool ok = state->player->PushVideoAccessUnit(buf, buf_size);
+	bool ok = state->player->PushVideoAccessUnit(buf, buf_size, frames_lost);
 	if(!ok || frames_lost || frame_recovered)
 		std::fprintf(stderr,
 			"[ct_av] video sample issue size=%zu ok=%d lost=%d recovered=%d\n",

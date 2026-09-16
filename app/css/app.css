@@ -224,6 +224,15 @@ html, body {
   border-color: var(--accent);
   font-weight: 600;
 }
+.tv-btn.danger {
+  color: #ffd9e1;
+  border-color: rgba(240, 90, 126, 0.55);
+  background: rgba(240, 90, 126, 0.12);
+}
+.tv-btn.danger:focus {
+  border-color: var(--glyph-pink);
+  box-shadow: 0 0 0 4px rgba(240,90,126,0.18), 0 0 34px rgba(240,90,126,0.35);
+}
 .tv-input {
   font: inherit; font-size: 28px; color: var(--text);
   background: var(--panel);
@@ -244,10 +253,25 @@ h2 { font-size: 52px; font-weight: 300; margin-bottom: 16px; letter-spacing: 0.0
 /* ---------- forms (pairing / settings share the same column) ---------- */
 #regist-form, .settings-panel {
   display: flex; flex-direction: column;
-  width: 720px; margin-top: 12px;
+  width: 1180px; margin-top: 12px;
 }
 .settings-panel .tv-input,
 #regist-target { width: 360px; }
+.debug-report {
+  width: 1180px; height: 330px; margin-top: 28px;
+  font: 20px/1.35 monospace; color: var(--text);
+  background: rgba(0,0,0,0.32);
+  border: 2px solid var(--panel-edge);
+  border-radius: var(--radius-sm);
+  padding: 18px 20px;
+  resize: none;
+  white-space: pre;
+}
+.debug-report:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
 
 /* ---------- hints footer ---------- */
 .hints {

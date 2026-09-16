@@ -27,15 +27,187 @@
 <!-- Hidden by default now — toggle with the Blue remote key (see
      KEY.BLUE handling in app.js), so it's fully out of the way during normal
      use and only covers the screen when actually checking it. -->
-<pre id="ct-debug-log" style="display:none;position:fixed;left:0;width:38vw;bottom:0;max-height:24vh;
-  margin:0;padding:6px 8px;overflow-y:auto;background:rgba(0,0,0,0.85);color:#7fffa0;
-  font-family:monospace;font-size:13px;line-height:1.35;white-space:pre-wrap;
-  z-index:99999;"></pre>
+<div id="ct-debug-panel" style="display:none;position:fixed;left:0;width:52vw;bottom:0;max-height:58vh;
+  margin:0;background:rgba(0,0,0,0.88);color:#7fffa0;font-family:monospace;
+  font-size:13px;line-height:1.35;z-index:99999;border-top-right-radius:8px;overflow:hidden;">
+  <pre id="ct-debug-log" style="display:block;margin:0;padding:6px 8px;max-height:24vh;overflow-y:auto;
+    white-space:pre-wrap;"></pre>
+  <div style="display:flex;gap:8px;align-items:center;padding:6px 8px;border-top:1px solid rgba(127,255,160,0.28);">
+    <button id="ct-debug-send" style="font:inherit;font-size:14px;color:#07100a;background:#7fffa0;
+      border:0;border-radius:4px;padding:5px 10px;">Send debug</button>
+    <span id="ct-debug-send-status" style="color:#d3ffdd;"></span>
+  </div>
+  <textarea id="ct-debug-report-text" readonly style="display:none;width:100%;height:26vh;box-sizing:border-box;
+    border:0;border-top:1px solid rgba(127,255,160,0.28);margin:0;padding:8px;background:rgba(0,0,0,0.36);
+    color:#d3ffdd;font:12px/1.35 monospace;white-space:pre;"></textarea>
+</div>
 <script>
   window.__ctToggleDebugLog = function() {
-    var el = document.getElementById('ct-debug-log');
-    if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+    var el = document.getElementById('ct-debug-panel');
+    if (!el) return;
+    var showing = el.style.display === 'none';
+    el.style.display = showing ? 'block' : 'none';
+    if (showing) {
+      var btn = document.getElementById('ct-debug-send');
+      if (btn) btn.focus();
+    }
   };
+  window.__ctRedactDebugText = function(text) {
+    return String(text == null ? '' : text)
+      .replace(/\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\b/g, '$1.x')
+      .replace(/\b[A-Za-z0-9+/]{28,}={0,2}\b/g, '<redacted-token>');
+  };
+  window.__ctSimpleDebugObject = function(obj) {
+    if (!obj) return 'unavailable';
+    var out = {};
+    var keys = [];
+    try { keys = Object.keys(obj); } catch (e) {}
+    [
+      'model', 'manufacturer', 'buildVersion', 'name', 'version',
+      'resolutionWidth', 'resolutionHeight', 'dotsPerInchWidth', 'dotsPerInchHeight',
+      'physicalWidth', 'physicalHeight', 'networkType', 'ipAddress', 'ipv6Address',
+      'macAddress', 'ssid', 'status', 'cable'
+    ].forEach(function(k) { if (keys.indexOf(k) < 0) keys.push(k); });
+    keys.forEach(function(k) {
+      var v;
+      try { v = obj[k]; } catch (e) { return; }
+      if (v == null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+        out[k] = v;
+    });
+    try { return window.__ctRedactDebugText(JSON.stringify(out)); }
+    catch (e) { return 'unavailable'; }
+  };
+  window.__ctBuildDebugReport = function(done) {
+    var lines = [
+      'Chiaki for Tizen debug report',
+      'generated=' + new Date().toISOString(),
+      'location=' + window.__ctRedactDebugText(location.href),
+      'userAgent=' + window.__ctRedactDebugText(navigator.userAgent || ''),
+      'screen=' + screen.width + 'x' + screen.height +
+        ' devicePixelRatio=' + (window.devicePixelRatio || 1),
+      'webAssembly=' + (typeof WebAssembly !== 'undefined') +
+        ' worker=' + (typeof Worker !== 'undefined') +
+        ' sharedArrayBuffer=' + (typeof SharedArrayBuffer !== 'undefined') +
+        ' atomics=' + (typeof Atomics !== 'undefined')
+    ];
+    try {
+      var keys = [];
+      for (var i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+      keys.sort();
+      lines.push('localStorageKeys=' + keys.join(','));
+      var consoles = JSON.parse(localStorage.getItem('consoles') || '[]');
+      lines.push('savedConsoles=' + consoles.length);
+    } catch (e) {
+      lines.push('localStorage=unavailable');
+    }
+    try {
+      if (window.tizen && tizen.application) {
+        var app = tizen.application.getCurrentApplication();
+        if (app && app.appInfo)
+          lines.push('appInfo=' + window.__ctSimpleDebugObject(app.appInfo));
+      }
+    } catch (e) {}
+    if (window.tizen && tizen.systeminfo) {
+      [
+        'http://tizen.org/system/model_name',
+        'http://tizen.org/system/manufacturer',
+        'http://tizen.org/system/platform.name',
+        'http://tizen.org/system/platform.version',
+        'http://tizen.org/system/build.string',
+        'http://tizen.org/feature/platform.version',
+        'http://tizen.org/feature/network.wifi',
+        'http://tizen.org/feature/network.ethernet'
+      ].forEach(function(key) {
+        try {
+          var val = tizen.systeminfo.getCapability(key);
+          if (val != null) lines.push('capability ' + key + '=' + window.__ctRedactDebugText(val));
+        } catch (e) {}
+      });
+      var pending = 0;
+      ['BUILD', 'DISPLAY', 'NETWORK', 'WIFI_NETWORK', 'ETHERNET_NETWORK'].forEach(function(prop) {
+        try {
+          pending++;
+          tizen.systeminfo.getPropertyValue(prop, function(info) {
+            lines.push('systeminfo ' + prop + '=' + window.__ctSimpleDebugObject(info));
+            if (--pending === 0) finish();
+          }, function(err) {
+            lines.push('systeminfo ' + prop + '=unavailable' +
+              (err && err.name ? ' (' + err.name + ')' : ''));
+            if (--pending === 0) finish();
+          });
+        } catch (e) {}
+      });
+      setTimeout(finish, 1200);
+      if (pending) return;
+    }
+    finish();
+    function finish() {
+      if (finish.done) return;
+      finish.done = true;
+      lines.push('diagnosticsTail:');
+      if (window.__ctDiagnostics && window.__ctDiagnostics.length) {
+        window.__ctDiagnostics.slice(-140).forEach(function(line) {
+          lines.push(window.__ctRedactDebugText(line));
+        });
+      } else {
+        lines.push('(none)');
+      }
+      done(lines.join('\n'));
+    }
+  };
+  window.__ctSendDebugReport = function() {
+    var status = document.getElementById('ct-debug-send-status');
+    var reportEl = document.getElementById('ct-debug-report-text');
+    if (status) status.textContent = 'Collecting report...';
+    window.__ctBuildDebugReport(function(report) {
+      if (reportEl) {
+        reportEl.value = report;
+        reportEl.style.display = 'block';
+        reportEl.focus();
+      }
+      if (navigator.share) {
+        navigator.share({ title: 'Chiaki for Tizen debug report', text: report }).then(function() {
+          if (status) status.textContent = 'Shared.';
+        }, function() {
+          if (status) status.textContent = 'Report shown below.';
+        });
+        return;
+      }
+      var body = encodeURIComponent(report.slice(0, 6000));
+      var url = 'https://github.com/trent407/chiaki-tizen/issues/new?title=' +
+        encodeURIComponent('TV debug report') + '&body=' + body;
+      try {
+        if (status) status.textContent = 'Opening issue page; report also shown below.';
+        var w = window.open(url, '_blank');
+        if (!w) location.href = url;
+      } catch (e) {
+        if (status) status.textContent = 'Report shown below.';
+      }
+    });
+  };
+  window.addEventListener('load', function() {
+    var btn = document.getElementById('ct-debug-send');
+    if (btn) btn.onclick = window.__ctSendDebugReport;
+  });
+  (function() {
+    var btn = document.getElementById('ct-debug-send');
+    if (btn) btn.onclick = window.__ctSendDebugReport;
+  })();
+  window.addEventListener('keydown', function(e) {
+    if (window.ChiakiTizen) return; // app.js owns these once it has loaded
+    var code = e.keyCode;
+    if (code === 406) {
+      e.preventDefault();
+      window.__ctToggleDebugLog();
+    } else if (code === 427 || code === 428) {
+      var panel = document.getElementById('ct-debug-panel');
+      var logEl = document.getElementById('ct-debug-log');
+      if (panel && panel.style.display !== 'none' && logEl) {
+        e.preventDefault();
+        logEl.scrollTop += (code === 427 ? -1 : 1) * (logEl.clientHeight * 0.8);
+      }
+    }
+  }, true);
 </script>
 
 <!-- ======================= Console list ======================= -->
@@ -117,8 +289,11 @@
     </label>
     <div class="actions">
       <button id="btn-settings-save" class="tv-btn primary" data-nav>Save</button>
+      <button id="btn-debug-report" class="tv-btn" data-nav>Debug report</button>
+      <button id="btn-reset-data" class="tv-btn danger" data-nav>Reset saved data</button>
       <button id="btn-settings-cancel" class="tv-btn" data-nav>Cancel</button>
     </div>
+    <textarea id="debug-report" class="debug-report hidden" readonly data-nav></textarea>
   </div>
   <p id="settings-status" class="status" role="status"></p>
 </section>

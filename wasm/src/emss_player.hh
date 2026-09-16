@@ -61,9 +61,13 @@ public:
 	void Stop();
 
 	// Called from chiaki's video receiver thread. buf is a full Annex-B
-	// access unit. Returns false if the packet could not be appended (the
-	// caller can then request an IDR frame from the console).
-	bool PushVideoAccessUnit(const uint8_t *buf, size_t buf_size);
+	// access unit. frames_lost is chiaki's count of frames dropped
+	// immediately before this one (0 when none); folded into the video
+	// clock so its PTS keeps pace with real elapsed time across network
+	// loss instead of drifting behind audio. Returns false if the packet
+	// could not be appended (the caller can then request an IDR frame from
+	// the console).
+	bool PushVideoAccessUnit(const uint8_t *buf, size_t buf_size, int32_t frames_lost);
 
 	// Called from chiaki's audio thread with interleaved S16 PCM.
 	void PushAudioPcm(const int16_t *pcm, size_t samples_per_channel);

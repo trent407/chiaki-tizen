@@ -90,16 +90,17 @@ body.perf-ui .screen.active { animation: none; }
 
 /* ---------- masthead ---------- */
 .masthead {
-  margin-bottom: 44px; display: flex; flex-direction: column;
-  align-items: flex-start;
+  margin-bottom: 44px; display: grid;
+  grid-template-columns: auto 1fr; grid-template-rows: auto auto;
+  column-gap: 22px; align-items: center;
 }
-.app-logo { width: 430px; height: auto; display: block; filter: invert(1); }
+.app-logo { width: 330px; height: auto; display: block; filter: invert(1); align-self: end; }
 .app-mark { width: 92px; height: 92px; grid-row: 1 / span 2; border-radius: 20px; }
 .masthead h1 {
   font-size: 76px; font-weight: 200; letter-spacing: 0.1em;
   text-transform: uppercase; line-height: 1;
 }
-.masthead .sub { font-size: 26px; color: var(--text-dim); margin-top: 8px; letter-spacing: 0.02em; }
+.masthead .sub { grid-column: 2; font-size: 26px; color: var(--text-dim); margin-top: 4px; letter-spacing: 0.02em; }
 
 /* ---------- PlayStation glyphs (user artwork in app/icons/) ---------- */
 .glyph-row { display: flex; gap: 18px; margin-bottom: 20px; }

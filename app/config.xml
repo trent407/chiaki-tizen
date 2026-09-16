@@ -2,7 +2,7 @@
 <widget xmlns="http://www.w3.org/ns/widgets"
         xmlns:tizen="http://tizen.org/ns/widgets"
         id="http://chiaki-tizen.example/chiaki-tizen"
-        version="0.1.0" viewmodes="maximized">
+        version="0.1.1" viewmodes="maximized">
     <tizen:application id="ChIaKiTiZ0.ChiakiTizen" package="ChIaKiTiZ0" required_version="5.5"/>
     <content src="index.html"/>
     <feature name="http://tizen.org/feature/screen.size.all"/>

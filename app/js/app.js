@@ -76,6 +76,20 @@ function findConsoleById(id) {
   return loadConsoles().find(function(c) { return entryId(c) === id; });
 }
 
+function dedupeConsoles(list) {
+  var out = [], seen = {};
+  list.forEach(function(c) {
+    var id = entryId(c);
+    if (seen[id] == null) {
+      seen[id] = out.length;
+      out.push(c);
+    } else {
+      out[seen[id]] = Object.assign(out[seen[id]], c);
+    }
+  });
+  return out;
+}
+
 // One-time prefill from a bundled prefill.json (for "personal" builds). Applies
 // once per install — a flag guards it, so a console you later delete stays gone.
 // An entry with registKeyB64 + rpKeyB64 becomes a ready-to-stream console; an
@@ -433,7 +447,118 @@ function focusCardIfOnDelete() {
 // ---------------------------------------------------------------------------
 function onDiscoveryHosts(hosts) {
   hosts.forEach(function(h) { state.discovered[h.hostAddr] = h; });
+  reconcileSavedConsoleAddresses();
   if (state.screen === 'consoles') renderConsoleList();
+}
+
+function discoveredConsoleType(d) {
+  var text = ((d && d.hostType) || '') + ' ' + ((d && d.hostName) || '');
+  if (/ps5/i.test(text)) return 'ps5';
+  if (/ps4/i.test(text)) return 'ps4';
+  return null;
+}
+
+function discoveredOnlineState(host) {
+  var d = state.discovered[host];
+  return d && (d.state === 'ready' || d.state === 'standby');
+}
+
+function updateSavedDiscoveryMetadata(list) {
+  var changed = false;
+  list.forEach(function(c) {
+    var d = state.discovered[c.host];
+    if (!d) return;
+    if (d.hostId && c.hostId !== d.hostId) {
+      c.hostId = d.hostId;
+      changed = true;
+    }
+    if (d.hostName && !c.discoveredName) {
+      c.discoveredName = d.hostName;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function migrateSavedHost(list, oldHost, newHost, d) {
+  var changed = false;
+  list.forEach(function(c) {
+    if (c.host !== oldHost) return;
+    c.host = newHost;
+    c.id = consoleId(newHost, c.accountB64);
+    if (d && d.hostId) c.hostId = d.hostId;
+    if (d && d.hostName && !c.discoveredName) c.discoveredName = d.hostName;
+    changed = true;
+  });
+  return changed;
+}
+
+function reconcileSavedConsoleAddresses() {
+  var saved = loadConsoles();
+  if (!saved.length) return;
+
+  var changed = updateSavedDiscoveryMetadata(saved);
+  var savedHosts = {};
+  saved.forEach(function(c) { if (c.host) savedHosts[c.host] = true; });
+
+  // Strong match: once we have stored a discovery hostId, follow it across
+  // DHCP changes. All profiles for the old address move together.
+  Object.keys(state.discovered).forEach(function(host) {
+    if (savedHosts[host]) return;
+    var d = state.discovered[host];
+    if (!d || !d.hostId || !discoveredOnlineState(host)) return;
+    var oldHosts = {};
+    saved.forEach(function(c) {
+      if (c.hostId === d.hostId && c.host !== host)
+        oldHosts[c.host] = true;
+    });
+    Object.keys(oldHosts).forEach(function(oldHost) {
+      if (migrateSavedHost(saved, oldHost, host, d)) {
+        changed = true;
+        if (window.__ctReport)
+          window.__ctReport('discovery', 'updated saved console address ' +
+            oldHost + ' -> ' + host + ' by hostId');
+      }
+    });
+  });
+
+  savedHosts = {};
+  saved.forEach(function(c) { if (c.host) savedHosts[c.host] = true; });
+
+  // Fallback for existing installs that never stored hostId: if exactly one
+  // unsaved online console of a type appears and exactly one offline paired
+  // saved address of that same type exists, treat it as DHCP reassignment.
+  ['ps5', 'ps4'].forEach(function(type) {
+    var candidates = [];
+    Object.keys(state.discovered).forEach(function(host) {
+      if (savedHosts[host] || !discoveredOnlineState(host)) return;
+      var d = state.discovered[host];
+      if (discoveredConsoleType(d) === type)
+        candidates.push({ host: host, discovery: d });
+    });
+    if (candidates.length !== 1) return;
+
+    var oldHosts = {};
+    saved.forEach(function(c) {
+      if (!c.registKeyB64 || !c.rpKeyB64) return;
+      if ((type === 'ps5') !== !!c.ps5) return;
+      if (discoveredOnlineState(c.host)) return;
+      oldHosts[c.host] = true;
+    });
+    var oldHostList = Object.keys(oldHosts);
+    if (oldHostList.length !== 1) return;
+
+    var candidate = candidates[0];
+    if (migrateSavedHost(saved, oldHostList[0], candidate.host, candidate.discovery)) {
+      changed = true;
+      if (window.__ctReport)
+        window.__ctReport('discovery', 'updated saved console address ' +
+          oldHostList[0] + ' -> ' + candidate.host + ' by single-candidate match');
+    }
+  });
+
+  if (changed)
+    saveConsoles(dedupeConsoles(saved));
 }
 
 function renderConsoleList() {

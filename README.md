@@ -113,6 +113,11 @@ This is how every chiaki API call in this port was verified.
   consoles, pairing keys, PSN token, and stream settings. This is useful after
   reinstalling through a source that uses the same Tizen app id, because some
   TVs preserve app web storage across uninstall/reinstall.
+- If your router gives the PlayStation a new IP address, discovery will try to
+  relink saved paired profiles to the new address automatically. It first uses
+  the console's discovery host id when available; for older saved entries, it
+  only guesses when there is exactly one offline saved console of that type and
+  exactly one newly discovered console of that type.
 
 ## Controller setup
 

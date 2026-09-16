@@ -37,6 +37,8 @@ var state = {
   screen: 'consoles',
   streaming: false,
   discovered: {},        // hostId -> discovery info
+  consoleListSignature: '',
+  consoleListRenderTimer: null,
   registTargetHost: null,
   gamepadTimer: null,
   remoteButtons: 0       // buttons held via TV remote during stream
@@ -69,6 +71,7 @@ function upsertConsole(entry) {
 }
 function removeConsoleById(id) {
   saveConsoles(loadConsoles().filter(function(c) { return entryId(c) !== id; }));
+  state.consoleListSignature = '';
   renderConsoleList();
   if (typeof restartDiscovery === 'function') restartDiscovery();
 }
@@ -448,7 +451,16 @@ function focusCardIfOnDelete() {
 function onDiscoveryHosts(hosts) {
   hosts.forEach(function(h) { state.discovered[h.hostAddr] = h; });
   reconcileSavedConsoleAddresses();
-  if (state.screen === 'consoles') renderConsoleList();
+  scheduleConsoleListRender();
+}
+
+function scheduleConsoleListRender() {
+  if (state.screen !== 'consoles') return;
+  if (state.consoleListRenderTimer) return;
+  state.consoleListRenderTimer = setTimeout(function() {
+    state.consoleListRenderTimer = null;
+    renderConsoleList();
+  }, 150);
 }
 
 function discoveredConsoleType(d) {
@@ -563,8 +575,6 @@ function reconcileSavedConsoleAddresses() {
 
 function renderConsoleList() {
   var listEl = document.getElementById('console-list');
-  listEl.innerHTML = '';
-
   var saved = loadConsoles();
   var savedHosts = {};
   var entries = [];
@@ -589,6 +599,25 @@ function renderConsoleList() {
       psn: '', saved: false
     });
   });
+
+  var signature = JSON.stringify(entries.map(function(e) {
+    return [
+      e.id || '', e.host || '', e.name || '', e.paired ? 1 : 0,
+      e.ps5 ? 1 : 0, e.state || '', e.app || '', e.psn || '', e.saved ? 1 : 0
+    ];
+  }));
+  if (signature === state.consoleListSignature)
+    return;
+  state.consoleListSignature = signature;
+
+  var focusedId = document.activeElement && document.activeElement.dataset
+    ? document.activeElement.dataset.id : '';
+  var focusedHost = document.activeElement && document.activeElement.dataset
+    ? document.activeElement.dataset.host : '';
+  var focusedDelete = document.activeElement &&
+    document.activeElement.classList.contains('cc-del');
+
+  listEl.innerHTML = '';
 
   if (!entries.length) {
     listEl.innerHTML = '<p class="empty-hint searching">Searching for consoles on your network&hellip; ' +
@@ -627,12 +656,31 @@ function renderConsoleList() {
       '</span>';
     listEl.appendChild(card);
   });
+
+  if (focusedId || focusedHost) {
+    var selector = focusedId
+      ? '.console-card[data-id="' + cssEscape(focusedId) + '"]'
+      : '.console-card[data-host="' + cssEscape(focusedHost) + '"]';
+    var restored = listEl.querySelector(selector);
+    if (restored) {
+      if (focusedDelete) {
+        var del = restored.querySelector('.cc-del');
+        if (del) restored = del;
+      }
+      restored.focus();
+    }
+  }
 }
 
 function escapeHtml(s) {
   var d = document.createElement('div');
   d.textContent = s == null ? '' : String(s);
   return d.innerHTML;
+}
+
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/["\\]/g, '\\$&');
 }
 
 function activateConsole(card) {
@@ -1014,6 +1062,7 @@ function resetSavedData() {
   state.discovered = {};
   state.currentHost = null;
   state.lastStats = null;
+  state.consoleListSignature = '';
   document.getElementById('setting-resolution').value = '3';
   document.getElementById('setting-fps').value = '30';
   document.getElementById('setting-hdr').value = '0';

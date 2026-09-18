@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=1920, height=1080">
 <title>Chiaki for Tizen</title>
+<script>window.__ctSplashShownAt=Date.now();</script>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body class="perf-ui">
@@ -216,8 +217,10 @@
     <img class="app-mark" src="icon_small.png" alt="">
     <img class="app-logo" src="chiaki-tizen-logo.png" alt="Chiaki">
     <p class="sub">
-      PlayStation Remote Play &middot; local network
+      PlayStation Remote Play
+      <span id="local-network-chip" class="psn-status-chip hidden">Local network</span>
       <span id="psn-status-chip" class="psn-status-chip hidden">PSN signed in</span>
+      <span id="nat-status-chip" class="psn-status-chip nat-status-chip hidden">NAT: checking</span>
     </p>
   </header>
 
@@ -235,6 +238,8 @@
     <span><i class="glyph pyramid small"></i> Wake</span>
     <span><i class="glyph box small"></i> Pair</span>
     <span><i class="glyph moon small"></i> Back</span>
+    <span><i class="remote-key yellow"></i> Overlay</span>
+    <span><i class="remote-key blue"></i> Debug</span>
   </footer>
 </section>
 
@@ -261,6 +266,7 @@
     <p id="regist-account-hint" class="field-hint"></p>
     <label>Display name / PSN ID (optional) <input id="regist-label" class="tv-input" data-nav placeholder="e.g. your PSN handle"></label>
     <label>Link code <input id="regist-pin" class="tv-input" data-nav inputmode="numeric" maxlength="8" placeholder="00000000"></label>
+    <button id="btn-regist-auto" class="tv-btn secondary hidden" type="button" data-nav>Pair automatically</button>
     <div class="actions">
       <button id="btn-regist-go" class="tv-btn primary" data-nav>Pair</button>
       <button id="btn-regist-cancel" class="tv-btn" data-nav>Cancel</button>
@@ -271,13 +277,14 @@
 
 <!-- ======================= Settings ======================= -->
 <section id="screen-settings" class="screen">
-  <h2>Settings</h2>
-  <div class="settings-panel">
+  <div class="settings-topbar">
+    <h2>Settings</h2>
     <div class="settings-tabs">
       <button id="btn-settings-video-tab" class="tv-btn settings-tab active" data-nav>Video Settings</button>
       <button id="btn-settings-psn-tab" class="tv-btn settings-tab" data-nav>PSN Login</button>
     </div>
-
+  </div>
+  <div class="settings-panel">
     <div id="settings-page-video" class="settings-page active">
       <label>Resolution
         <div class="tv-select-wrap">
@@ -299,7 +306,34 @@
           <div id="setting-fps-menu" class="tv-select-menu hidden"></div>
         </div>
       </label>
-      <label>HDR (PS5 only &middot; experimental)
+      <div class="video-settings-grid">
+        <label>Local bitrate
+          <div class="tv-select-wrap">
+            <select id="setting-bitrate-local" class="native-select-source bitrate-select" tabindex="-1" aria-hidden="true"></select>
+            <button id="setting-bitrate-local-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-bitrate-local"></button>
+            <div id="setting-bitrate-local-menu" class="tv-select-menu hidden"></div>
+          </div>
+        </label>
+        <label>Remote bitrate
+          <div class="tv-select-wrap">
+            <select id="setting-bitrate-remote" class="native-select-source bitrate-select" tabindex="-1" aria-hidden="true"></select>
+            <button id="setting-bitrate-remote-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-bitrate-remote"></button>
+            <div id="setting-bitrate-remote-menu" class="tv-select-menu hidden"></div>
+          </div>
+        </label>
+        <label>Codec
+          <div class="tv-select-wrap">
+            <select id="setting-codec" class="native-select-source" tabindex="-1" aria-hidden="true">
+              <option value="h264">H.264</option>
+              <option value="h265">H.265 HEVC</option>
+              <option value="h265_hdr">HDR10</option>
+            </select>
+            <button id="setting-codec-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-codec"></button>
+            <div id="setting-codec-menu" class="tv-select-menu hidden"></div>
+          </div>
+        </label>
+      </div>
+      <label class="legacy-hdr-row hidden">HDR (legacy)
         <div class="tv-select-wrap">
           <select id="setting-hdr" class="native-select-source" tabindex="-1" aria-hidden="true">
             <option value="0">Off</option>
@@ -312,29 +346,54 @@
     </div>
 
     <div id="settings-page-psn" class="settings-page">
-      <div id="setting-psn-auth-row" class="psn-auth">
-        <label>PSN redirect URL
-          <input id="setting-psn-redirect" class="tv-input" data-nav placeholder="paste Sony redirect URL or code">
-        </label>
-        <div class="actions compact">
-          <button id="btn-psn-login" class="tv-btn" data-nav>Show PSN login QR</button>
-          <button id="btn-psn-save" class="tv-btn" data-nav>Save PSN login</button>
-          <button id="btn-psn-clear" class="tv-btn danger" data-nav>Clear PSN login</button>
+      <div class="psn-page-grid">
+        <div class="psn-login-column">
+          <div id="setting-psn-auth-row" class="psn-auth">
+            <label>Active PSN login
+              <div class="tv-select-wrap">
+                <select id="setting-psn-profile" class="native-select-source" tabindex="-1" aria-hidden="true">
+                  <option value="">No saved PSN logins</option>
+                </select>
+                <button id="setting-psn-profile-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-psn-profile"></button>
+                <div id="setting-psn-profile-menu" class="tv-select-menu hidden"></div>
+              </div>
+            </label>
+            <label>PSN redirect URL
+              <input id="setting-psn-redirect" class="tv-input" data-nav placeholder="paste Sony redirect URL or code">
+            </label>
+            <div class="actions compact psn-login-actions">
+              <button id="btn-psn-login" class="tv-btn" data-nav>Show PSN login QR</button>
+              <button id="btn-psn-save" class="tv-btn" data-nav>Save PSN login</button>
+              <button id="btn-psn-clear" class="tv-btn danger" data-nav>Clear PSN login</button>
+            </div>
+            <div id="psn-login-helper" class="psn-login-helper hidden">
+              <img id="psn-login-qr" class="psn-login-qr" alt="PSN login QR code">
+              <div class="psn-login-details">
+                <p class="psn-login-tip">
+                  Scan the QR on another device. Samsung SmartThings and Apps2Samsung keyboards can make copying and pasting the redirect URL easier.
+                </p>
+                <button id="btn-psn-show-link" type="button" class="tv-btn compact-btn" data-nav>Show Link</button>
+                <textarea id="psn-login-url" class="psn-login-url hidden" readonly data-nav></textarea>
+              </div>
+            </div>
+          </div>
+          <label id="setting-psn-token-row" class="hidden">PSN token (for remote play over the internet &middot; experimental)
+            <input id="setting-psn-token" class="tv-input" data-nav placeholder="paste PSN OAuth token">
+          </label>
         </div>
-        <div id="psn-login-helper" class="psn-login-helper hidden">
-          <img id="psn-login-qr" class="psn-login-qr" alt="PSN login QR code">
-          <textarea id="psn-login-url" class="psn-login-url" readonly data-nav></textarea>
+
+        <div class="psn-side-column">
+          <div class="psn-side-actions">
+            <button id="btn-psn-debug-report" class="tv-btn" data-nav>Send debug report</button>
+            <button id="btn-psn-reset-data" class="tv-btn danger" data-nav>Reset saved data</button>
+            <button id="btn-psn-cancel-settings" class="tv-btn" data-nav>Cancel</button>
+          </div>
+          <div class="psn-side-space"></div>
         </div>
-        <p class="psn-login-tip">
-          Scan the QR on another device. Samsung SmartThings and Apps2Samsung keyboards can make copying and pasting the redirect URL easier.
-        </p>
       </div>
-      <label id="setting-psn-token-row" class="hidden">PSN token (for remote play over the internet &middot; experimental)
-        <input id="setting-psn-token" class="tv-input" data-nav placeholder="paste PSN OAuth token">
-      </label>
     </div>
 
-    <div class="actions">
+    <div class="actions settings-actions">
       <button id="btn-settings-save" class="tv-btn primary video-settings-only" data-nav>Save</button>
       <button id="btn-debug-report" class="tv-btn" data-nav>Send debug report</button>
       <button id="btn-reset-data" class="tv-btn danger" data-nav>Reset saved data</button>
@@ -367,6 +426,7 @@
         <dt>Resolution</dt><dd id="hud-res">&mdash;</dd>
         <dt>Frame rate</dt><dd id="hud-fps">&mdash;</dd>
         <dt>Bitrate</dt><dd id="hud-bitrate">&mdash;</dd>
+        <dt>Codec</dt><dd id="hud-codec">&mdash;</dd>
         <dt>HDR</dt><dd id="hud-hdr">&mdash;</dd>
         <dt>Console IP</dt><dd id="hud-ip">&mdash;</dd>
       </dl>

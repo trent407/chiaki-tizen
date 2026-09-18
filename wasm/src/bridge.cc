@@ -182,6 +182,7 @@ struct BridgeState
 	ChiakiSession session;
 	bool session_active = false;
 	ChiakiOpusDecoder opus_decoder;
+	bool opus_decoder_active = false;
 	std::unique_ptr<chiaki_tizen::EmssPlayer> player;
 	ChiakiControllerState controller_state;
 
@@ -328,8 +329,8 @@ void OpusSettingsCb(uint32_t channels, uint32_t rate, void *user)
 	EmitEvent("audioSettings", fields);
 }
 
-void OpusFrameCb(int16_t *buf, size_t samples_count, void *user)
-{
+	void OpusFrameCb(int16_t *buf, size_t samples_count, void *user)
+	{
 	auto *state = static_cast<BridgeState *>(user);
 	if(!state->player)
 		return;
@@ -338,11 +339,32 @@ void OpusFrameCb(int16_t *buf, size_t samples_count, void *user)
 		channels = 2;
 	// opus_decode() returns samples per channel; the PCM buffer itself is
 	// interleaved, and EmssPlayer expects this per-channel sample count.
-	state->player->PushAudioPcm(buf, samples_count);
-}
+		state->player->PushAudioPcm(buf, samples_count);
+	}
 
-void SessionEventCb(ChiakiEvent *event, void *user)
-{
+	std::string RegisteredHostFields(ChiakiRegisteredHost *host)
+	{
+		char rp_key_b64[CHIAKI_RPCRYPT_KEY_SIZE * 2 + 8] = {0};
+		char regist_key_b64[sizeof(host->rp_regist_key) * 2 + 8] = {0};
+		chiaki_base64_encode(host->rp_key, sizeof(host->rp_key),
+			rp_key_b64, sizeof(rp_key_b64));
+		chiaki_base64_encode(reinterpret_cast<uint8_t *>(host->rp_regist_key),
+			sizeof(host->rp_regist_key), regist_key_b64, sizeof(regist_key_b64));
+
+		std::string fields = "\"success\":true";
+		fields += ",\"serverNickname\":\"";
+		fields += JsonEscape(host->server_nickname);
+		fields += "\",\"rpKeyB64\":\"";
+		fields += rp_key_b64;
+		fields += "\",\"registKeyB64\":\"";
+		fields += regist_key_b64;
+		fields += "\",\"target\":";
+		fields += std::to_string(static_cast<int>(host->target));
+		return fields;
+	}
+
+	void SessionEventCb(ChiakiEvent *event, void *user)
+	{
 	(void)user;
 	switch(event->type)
 	{
@@ -364,16 +386,22 @@ void SessionEventCb(ChiakiEvent *event, void *user)
 			EmitEvent("rumble", fields);
 			break;
 		}
-		case CHIAKI_EVENT_QUIT:
+			case CHIAKI_EVENT_QUIT:
 		{
 			std::string fields = "\"reason\":\"";
 			fields += JsonEscape(chiaki_quit_reason_string(event->quit.reason));
 			fields += "\",\"isError\":";
 			fields += chiaki_quit_reason_is_error(event->quit.reason) ? "true" : "false";
-			EmitEvent("quit", fields);
-			break;
-		}
-		case CHIAKI_EVENT_NICKNAME_RECEIVED:
+				EmitEvent("quit", fields);
+				break;
+			}
+			case CHIAKI_EVENT_REGIST:
+			{
+				std::string fields = RegisteredHostFields(&event->host);
+				EmitEvent("autoRegistFinished", fields);
+				break;
+			}
+			case CHIAKI_EVENT_NICKNAME_RECEIVED:
 		{
 			std::string fields = "\"nickname\":\"";
 			fields += JsonEscape(event->server_nickname);
@@ -437,29 +465,13 @@ void RegistCb(ChiakiRegistEvent *event, void *user)
 	auto *state = static_cast<BridgeState *>(user);
 	switch(event->type)
 	{
-		case CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS:
-		{
-			CT_CHECKPOINT("RegistCb success");
-			ChiakiRegisteredHost *host = event->registered_host;
-			char rp_key_b64[CHIAKI_RPCRYPT_KEY_SIZE * 2 + 8] = {0};
-			char regist_key_b64[sizeof(host->rp_regist_key) * 2 + 8] = {0};
-			chiaki_base64_encode(host->rp_key, sizeof(host->rp_key),
-				rp_key_b64, sizeof(rp_key_b64));
-			chiaki_base64_encode(reinterpret_cast<uint8_t *>(host->rp_regist_key),
-				sizeof(host->rp_regist_key), regist_key_b64, sizeof(regist_key_b64));
-
-			std::string fields = "\"success\":true";
-			fields += ",\"serverNickname\":\"";
-			fields += JsonEscape(host->server_nickname);
-			fields += "\",\"rpKeyB64\":\"";
-			fields += rp_key_b64;
-			fields += "\",\"registKeyB64\":\"";
-			fields += regist_key_b64;
-			fields += "\",\"target\":";
-			fields += std::to_string(static_cast<int>(host->target));
-			EmitEvent("registFinished", fields);
-			break;
-		}
+			case CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS:
+			{
+				CT_CHECKPOINT("RegistCb success");
+				ChiakiRegisteredHost *host = event->registered_host;
+				EmitEvent("registFinished", RegisteredHostFields(host));
+				break;
+			}
 		case CHIAKI_REGIST_EVENT_TYPE_FINISHED_FAILED:
 			CT_CHECKPOINT("RegistCb failed");
 			EmitEvent("registFinished", "\"success\":false");
@@ -736,13 +748,24 @@ namespace
 // event ("quit") — the async ct_session_start below can't return a result,
 // so app.js learns of start failures the same way it learns of runtime
 // disconnects.
-void SessionStartImpl(const char *host, int ps5,
-	const char *regist_key_b64, const char *morning_b64,
-	int resolution_preset, int fps_preset, int hdr,
+	void SessionStartImpl(const char *host, int ps5,
+		const char *regist_key_b64, const char *morning_b64,
+		int resolution_preset, int fps_preset, int hdr,
+	int bitrate_kbps, int codec_value,
 	ChiakiHolepunchSession holepunch)
 {
-	// HDR is HEVC Main10, which only PS5 sends; never request it for a PS4.
-	bool want_hdr = hdr != 0 && ps5 != 0;
+	// HEVC is PS5-only; never request it for a PS4 even if stale settings ask.
+	ChiakiCodec requested_codec = CHIAKI_CODEC_H264;
+	if(ps5 != 0)
+	{
+		if(codec_value == CHIAKI_CODEC_H265_HDR || hdr != 0)
+			requested_codec = CHIAKI_CODEC_H265_HDR;
+		else if(codec_value == CHIAKI_CODEC_H265)
+			requested_codec = CHIAKI_CODEC_H265;
+	}
+	bool want_hevc = requested_codec == CHIAKI_CODEC_H265
+		|| requested_codec == CHIAKI_CODEC_H265_HDR;
+	bool want_hdr = requested_codec == CHIAKI_CODEC_H265_HDR;
 	if(!g_state || g_state->session_active)
 	{
 		EmitEvent("quit", "\"reason\":\"internal error (bad state)\",\"isError\":true");
@@ -756,7 +779,7 @@ void SessionStartImpl(const char *host, int ps5,
 	// a silent server-side downgrade (HEVC -> H.264) would feed the wrong codec
 	// into an already-configured decoder. Allow downgrade only on the plain
 	// H.264 path, where there is nothing lower to fall back to anyway.
-	connect_info.video_profile_auto_downgrade = !want_hdr;
+	connect_info.video_profile_auto_downgrade = !want_hevc;
 	// Remote (over-internet) play: the holepunch session carries the punched
 	// CTRL/DATA sockets + console address. NULL on the local-network path, in
 	// which case chiaki connects to `host` directly (unchanged behavior).
@@ -787,18 +810,15 @@ void SessionStartImpl(const char *host, int ps5,
 		static_cast<ChiakiVideoResolutionPreset>(resolution_preset),
 		static_cast<ChiakiVideoFPSPreset>(fps_preset));
 
-	// TVs are H.264-safe everywhere; HDR is the opt-in HEVC Main10 path (PS5
-	// only, see want_hdr above). The bitstream carries HDR10 static metadata
-	// in-band; requesting CHIAKI_CODEC_H265_HDR tells the console to send it and
-	// picks the Main10 mime in EmssPlayer. Experimental — verify on hardware.
-	if(want_hdr)
-		connect_info.video_profile.codec = CHIAKI_CODEC_H265_HDR;
+	if(bitrate_kbps > 0)
+		connect_info.video_profile.bitrate = static_cast<unsigned int>(bitrate_kbps);
+	connect_info.video_profile.codec = requested_codec;
 
 	chiaki_tizen::VideoConfig video_cfg;
 	video_cfg.width = connect_info.video_profile.width;
 	video_cfg.height = connect_info.video_profile.height;
 	video_cfg.fps = static_cast<unsigned>(fps_preset);
-	video_cfg.h265 = want_hdr;
+	video_cfg.h265 = want_hevc;
 	video_cfg.hdr = want_hdr;
 
 	// Seed HUD stats for this session.
@@ -828,6 +848,7 @@ void SessionStartImpl(const char *host, int ps5,
 	}
 
 	chiaki_opus_decoder_init(&g_state->opus_decoder, &g_state->log);
+	g_state->opus_decoder_active = true;
 	chiaki_opus_decoder_set_cb(&g_state->opus_decoder, OpusSettingsCb, OpusFrameCb, g_state);
 	ChiakiAudioSink audio_sink;
 	chiaki_opus_decoder_get_sink(&g_state->opus_decoder, &audio_sink);
@@ -841,27 +862,118 @@ void SessionStartImpl(const char *host, int ps5,
 	{
 		CHIAKI_LOGE(&g_state->log, "session start failed: %s", chiaki_error_string(err));
 		chiaki_opus_decoder_fini(&g_state->opus_decoder);
+		g_state->opus_decoder_active = false;
 		chiaki_session_fini(&g_state->session);
 		g_state->player.reset();
 		EmitEvent("quit", "\"reason\":\"session start failed\",\"isError\":true");
 		return;
 	}
 
-	g_state->session_active = true;
-}
+		g_state->session_active = true;
+	}
 
-} // namespace
+	bool DecodeB64Exact(const char *src, uint8_t *dst, size_t expected)
+	{
+		size_t size = expected;
+		return src && chiaki_base64_decode(src, strlen(src), dst, &size) == CHIAKI_ERR_SUCCESS
+			&& size == expected;
+	}
+
+	void AutoRegistStartRemoteImpl(int ps5,
+		const char *psn_account_id_b64,
+		const char *data1_b64, const char *data2_b64, const char *custom_data1_b64,
+		int ctrl_fd, int data_fd, const char *ps_ip, int ps_ctrl_port, const char *local_ip)
+	{
+		if(!g_state || g_state->session_active)
+		{
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"internal error (bad state)\"");
+			return;
+		}
+
+		ChiakiHolepunchRegistInfo rinfo;
+		memset(&rinfo, 0, sizeof(rinfo));
+		if(!DecodeB64Exact(data1_b64, rinfo.data1, sizeof(rinfo.data1))
+			|| !DecodeB64Exact(data2_b64, rinfo.data2, sizeof(rinfo.data2))
+			|| !DecodeB64Exact(custom_data1_b64, rinfo.custom_data1, sizeof(rinfo.custom_data1)))
+		{
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"bad remote registration data\"");
+			return;
+		}
+		if(local_ip && *local_ip)
+		{
+			strncpy(rinfo.regist_local_ip, local_ip, sizeof(rinfo.regist_local_ip) - 1);
+			rinfo.regist_local_ip[sizeof(rinfo.regist_local_ip) - 1] = '\0';
+		}
+
+		if(g_state->psn_ctrl_fd == ctrl_fd)
+			g_state->psn_ctrl_fd = -1;
+		if(g_state->psn_data_fd == data_fd)
+			g_state->psn_data_fd = -1;
+
+		ChiakiHolepunchSession hp = ct_holepunch_bridge_new(
+			ctrl_fd, data_fd, ps_ip ? ps_ip : "", (uint16_t)ps_ctrl_port, &rinfo);
+		if(!hp)
+		{
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"holepunch bridge alloc failed\"");
+			return;
+		}
+
+		ChiakiConnectInfo connect_info = {};
+		connect_info.ps5 = ps5 != 0;
+		connect_info.host = ps_ip;
+		connect_info.auto_regist = true;
+		connect_info.holepunch_session = hp;
+		connect_info.enable_keyboard = false;
+		connect_info.enable_dualsense = false;
+		connect_info.rudp_sock = nullptr;
+		connect_info.packet_loss_max = 0.05;
+		connect_info.enable_idr_on_fec_failure = true;
+		connect_info.video_profile_auto_downgrade = true;
+		chiaki_connect_video_profile_preset(&connect_info.video_profile,
+			CHIAKI_VIDEO_RESOLUTION_PRESET_720p, CHIAKI_VIDEO_FPS_PRESET_30);
+		connect_info.video_profile.codec = CHIAKI_CODEC_H264;
+
+		if(!DecodeB64Exact(psn_account_id_b64, connect_info.psn_account_id,
+			sizeof(connect_info.psn_account_id)))
+		{
+			chiaki_holepunch_session_fini(hp);
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"bad PSN account id\"");
+			return;
+		}
+
+		ChiakiErrorCode err = chiaki_session_init(&g_state->session, &connect_info, &g_state->log);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			chiaki_holepunch_session_fini(hp);
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"session init failed\"");
+			return;
+		}
+		chiaki_session_set_event_cb(&g_state->session, SessionEventCb, g_state);
+		err = chiaki_session_start(&g_state->session);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			chiaki_session_fini(&g_state->session);
+			EmitEvent("autoRegistFinished", "\"success\":false,\"error\":\"session start failed\"");
+			return;
+		}
+		g_state->session_active = true;
+	}
+
+	} // namespace
 
 CT_EXPORT int ct_session_start(const char *host, int ps5,
 	const char *regist_key_b64, const char *morning_b64,
-	int resolution_preset, int fps_preset, int hdr)
+	int resolution_preset, int fps_preset, int hdr,
+	int bitrate_kbps, int codec_value)
 {
 	std::string h = host ? host : "";
 	std::string key_b64 = regist_key_b64 ? regist_key_b64 : "";
 	std::string morning = morning_b64 ? morning_b64 : "";
-	DispatchToWorker([h, ps5, key_b64, morning, resolution_preset, fps_preset, hdr]() {
+	DispatchToWorker([h, ps5, key_b64, morning, resolution_preset, fps_preset, hdr,
+		bitrate_kbps, codec_value]() {
 		SessionStartImpl(h.c_str(), ps5, key_b64.c_str(), morning.c_str(),
-			resolution_preset, fps_preset, hdr, /*holepunch=*/nullptr);
+			resolution_preset, fps_preset, hdr, bitrate_kbps, codec_value,
+			/*holepunch=*/nullptr);
 	});
 	return 0; // queued — failures arrive via the "quit" event
 }
@@ -880,13 +992,14 @@ CT_EXPORT int ct_session_start(const char *host, int ps5,
 CT_EXPORT int ct_session_start_remote(int ps5,
 	const char *regist_key_b64, const char *morning_b64,
 	int resolution_preset, int fps_preset, int hdr,
+	int bitrate_kbps, int codec_value,
 	int ctrl_fd, int data_fd, const char *ps_ip, int ps_ctrl_port)
 {
 	std::string key_b64 = regist_key_b64 ? regist_key_b64 : "";
 	std::string morning = morning_b64 ? morning_b64 : "";
 	std::string ip = ps_ip ? ps_ip : "";
 	DispatchToWorker([ps5, key_b64, morning, resolution_preset, fps_preset, hdr,
-		ctrl_fd, data_fd, ip, ps_ctrl_port]() {
+		bitrate_kbps, codec_value, ctrl_fd, data_fd, ip, ps_ctrl_port]() {
 		ChiakiHolepunchRegistInfo rinfo;
 		memset(&rinfo, 0, sizeof(rinfo));
 		if(g_state)
@@ -908,7 +1021,25 @@ CT_EXPORT int ct_session_start_remote(int ps5,
 		// adapter is cleaned up there in a follow-up (TODO: wire fini on the
 		// pre-session_init error paths).
 		SessionStartImpl(ip.c_str(), ps5, key_b64.c_str(), morning.c_str(),
-			resolution_preset, fps_preset, hdr, hp);
+			resolution_preset, fps_preset, hdr, bitrate_kbps, codec_value, hp);
+	});
+	return 0;
+}
+
+CT_EXPORT int ct_auto_regist_start_remote(int ps5,
+	const char *psn_account_id_b64,
+	const char *data1_b64, const char *data2_b64, const char *custom_data1_b64,
+	int ctrl_fd, int data_fd, const char *ps_ip, int ps_ctrl_port, const char *local_ip)
+{
+	std::string account = psn_account_id_b64 ? psn_account_id_b64 : "";
+	std::string data1 = data1_b64 ? data1_b64 : "";
+	std::string data2 = data2_b64 ? data2_b64 : "";
+	std::string custom = custom_data1_b64 ? custom_data1_b64 : "";
+	std::string ip = ps_ip ? ps_ip : "";
+	std::string local = local_ip ? local_ip : "";
+	DispatchToWorker([ps5, account, data1, data2, custom, ctrl_fd, data_fd, ip, ps_ctrl_port, local]() {
+		AutoRegistStartRemoteImpl(ps5, account.c_str(), data1.c_str(), data2.c_str(),
+			custom.c_str(), ctrl_fd, data_fd, ip.c_str(), ps_ctrl_port, local.c_str());
 	});
 	return 0;
 }
@@ -1191,7 +1322,11 @@ CT_EXPORT void ct_session_stop()
 			return;
 		chiaki_session_stop(&g_state->session);
 		chiaki_session_join(&g_state->session);
-		chiaki_opus_decoder_fini(&g_state->opus_decoder);
+		if(g_state->opus_decoder_active)
+		{
+			chiaki_opus_decoder_fini(&g_state->opus_decoder);
+			g_state->opus_decoder_active = false;
+		}
 		chiaki_session_fini(&g_state->session);
 		if(g_state->player)
 		{

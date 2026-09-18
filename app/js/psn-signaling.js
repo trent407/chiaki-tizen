@@ -26,6 +26,7 @@ var PSN = {
   deviceList: 'https://web.np.playstation.com/api/cloudAssistedNavigation/v2/users/me/clients',
   wsFqdn:     'https://mobile-pushcl.np.communication.playstation.net/np/serveraddr?version=2.1&fields=keepAliveStatus&keepAliveStatusType=3',
   sessionCreate: 'https://web.np.playstation.com/api/sessionManager/v1/remotePlaySessions',
+  sessionCommand: 'https://web.np.playstation.com/api/cloudAssistedNavigation/v2/users/me/commands',
   sessionMessage: function(id) {
     return 'https://web.np.playstation.com/api/sessionManager/v1/remotePlaySessions/' + id + '/sessionMessage';
   },
@@ -50,6 +51,10 @@ var state = {
   sidLocal: 0,
   hashedConsoleB64: null,
   sidConsole: 0,
+  registData1B64: null,
+  registData2B64: null,
+  customData1B64: null,
+  localRegistIp: '',
   reqId: 0
 };
 
@@ -70,6 +75,26 @@ function bytesToB64(u8) {
   return btoa(s);
 }
 var ZERO_SKEY_B64 = bytesToB64(new Uint8Array(16)); // 16 zero bytes
+var PSN_PROFILES_KEY = 'psnProfiles';
+var PSN_ACTIVE_PROFILE_KEY = 'psnActiveProfileId';
+
+function notifyPersistentBackup() {
+  if (window.ChiakiTizenBackup && window.ChiakiTizenBackup.schedule)
+    window.ChiakiTizenBackup.schedule();
+}
+
+function randomB64(nbytes) {
+  var data = new Uint8Array(nbytes);
+  (window.crypto || window.msCrypto).getRandomValues(data);
+  return bytesToB64(data);
+}
+
+function resetRegistData() {
+  state.registData1B64 = randomB64(16);
+  state.registData2B64 = randomB64(16);
+  state.customData1B64 = null;
+  state.localRegistIp = '';
+}
 
 // --- PSN OAuth --------------------------------------------------------------
 function formEncode(obj) {
@@ -119,6 +144,7 @@ function saveTokenBundle(json) {
   var expiresIn = parseInt(json.expires_in, 10);
   if (expiresIn > 0)
     localStorage.setItem('psnTokenExpiresAt', String(Date.now() + Math.max(0, expiresIn - 60) * 1000));
+  saveCurrentProfile();
   return json.access_token;
 }
 
@@ -129,7 +155,15 @@ function saveAccountIds(decimal) {
   if (b64) localStorage.setItem('psnRemoteAccountId', b64);
   localStorage.setItem('psnRemoteAccountIdDecimal', decimal);
   state.accountId = decimal;
+  saveCurrentProfile();
   return b64;
+}
+
+function saveOnlineId(json) {
+  var onlineId = json && (json.online_id || json.onlineId || json.account_name || json.accountName);
+  if (onlineId)
+    localStorage.setItem('psnRemoteOnlineId', String(onlineId));
+  saveCurrentProfile();
 }
 
 function tokenPost(body) {
@@ -190,7 +224,10 @@ function fetchAccountId(accessToken) {
     if (!r.ok) throw new Error('PSN account request failed: ' + r.status);
     return r.json();
   }).then(function(json) {
-    return saveAccountIds(json && json.user_id);
+    saveOnlineId(json);
+    var b64 = saveAccountIds(json && json.user_id);
+    saveCurrentProfile();
+    return b64;
   });
 }
 
@@ -249,7 +286,7 @@ function saveToken(t) {
   localStorage.setItem('psnOAuthToken', t);
 }
 
-function clearTokens() {
+function clearActiveTokenKeys() {
   state.token = null;
   state.accountId = null;
   localStorage.removeItem('psnOAuthToken');
@@ -257,8 +294,126 @@ function clearTokens() {
   localStorage.removeItem('psnTokenExpiresAt');
   localStorage.removeItem('psnRemoteAccountId');
   localStorage.removeItem('psnRemoteAccountIdDecimal');
+  localStorage.removeItem('psnRemoteOnlineId');
   localStorage.removeItem('psnAccountId'); // legacy shared key from test builds
   localStorage.removeItem('psnAccountIdDecimal');
+}
+
+function readProfilesRaw() {
+  try {
+    var profiles = JSON.parse(localStorage.getItem(PSN_PROFILES_KEY) || '[]');
+    return Array.isArray(profiles) ? profiles.filter(function(p) { return p && p.id; }) : [];
+  } catch (e) { return []; }
+}
+
+function writeProfiles(profiles) {
+  localStorage.setItem(PSN_PROFILES_KEY, JSON.stringify(profiles || []));
+  notifyPersistentBackup();
+}
+
+function profileLabel(p) {
+  if (!p) return '';
+  if (p.onlineId) return p.onlineId;
+  if (p.accountDecimal) return 'ID ' + p.accountDecimal;
+  return p.accountB64 ? 'Saved PSN login' : '';
+}
+
+function profileFromCurrentStorage() {
+  var accountB64 = localStorage.getItem('psnRemoteAccountId') || '';
+  var accountDecimal = localStorage.getItem('psnRemoteAccountIdDecimal') ||
+    accountIdBase64ToDecimal(accountB64);
+  var token = localStorage.getItem('psnOAuthToken') || '';
+  var refreshToken = localStorage.getItem('psnRefreshToken') || '';
+  if ((!token && !refreshToken) || (!accountB64 && !accountDecimal)) return null;
+  var id = accountB64 || accountDecimal;
+  var onlineId = localStorage.getItem('psnRemoteOnlineId') || '';
+  return {
+    id: id,
+    label: onlineId || (accountDecimal ? ('ID ' + accountDecimal) : 'Saved PSN login'),
+    onlineId: onlineId,
+    accountB64: accountB64,
+    accountDecimal: accountDecimal,
+    token: token,
+    refreshToken: refreshToken,
+    expiresAt: localStorage.getItem('psnTokenExpiresAt') || ''
+  };
+}
+
+function saveCurrentProfile() {
+  var profile = profileFromCurrentStorage();
+  if (!profile) return null;
+  var profiles = readProfilesRaw();
+  var found = false;
+  profiles = profiles.map(function(p) {
+    if (p.id !== profile.id) return p;
+    found = true;
+    return Object.assign({}, p, profile);
+  });
+  if (!found) profiles.push(profile);
+  writeProfiles(profiles);
+  localStorage.setItem(PSN_ACTIVE_PROFILE_KEY, profile.id);
+  return profile;
+}
+
+function getProfiles() {
+  if (!readProfilesRaw().length) saveCurrentProfile();
+  return readProfilesRaw().map(function(p) {
+    p.label = p.label || profileLabel(p);
+    return p;
+  });
+}
+
+function getActiveProfileId() {
+  return localStorage.getItem(PSN_ACTIVE_PROFILE_KEY) || '';
+}
+
+function activateProfile(id) {
+  var profiles = getProfiles();
+  for (var i = 0; i < profiles.length; i++) {
+    var p = profiles[i];
+    if (p.id !== id) continue;
+    if (p.token) localStorage.setItem('psnOAuthToken', p.token);
+    else localStorage.removeItem('psnOAuthToken');
+    if (p.refreshToken) localStorage.setItem('psnRefreshToken', p.refreshToken);
+    else localStorage.removeItem('psnRefreshToken');
+    if (p.expiresAt) localStorage.setItem('psnTokenExpiresAt', p.expiresAt);
+    else localStorage.removeItem('psnTokenExpiresAt');
+    if (p.accountB64) localStorage.setItem('psnRemoteAccountId', p.accountB64);
+    else localStorage.removeItem('psnRemoteAccountId');
+    if (p.accountDecimal) localStorage.setItem('psnRemoteAccountIdDecimal', p.accountDecimal);
+    else localStorage.removeItem('psnRemoteAccountIdDecimal');
+    if (p.onlineId) localStorage.setItem('psnRemoteOnlineId', p.onlineId);
+    else localStorage.removeItem('psnRemoteOnlineId');
+    localStorage.setItem(PSN_ACTIVE_PROFILE_KEY, p.id);
+    state.token = p.token || null;
+    state.accountId = p.accountDecimal || accountIdBase64ToDecimal(p.accountB64);
+    notifyPersistentBackup();
+    return p;
+  }
+  return null;
+}
+
+function removeProfile(id) {
+  var profiles = getProfiles().filter(function(p) { return p.id !== id; });
+  writeProfiles(profiles);
+  if (getActiveProfileId() === id) {
+    if (profiles.length) activateProfile(profiles[0].id);
+    else {
+      localStorage.removeItem(PSN_ACTIVE_PROFILE_KEY);
+      clearActiveTokenKeys();
+    }
+  }
+  notifyPersistentBackup();
+  return profiles;
+}
+
+function clearTokens() {
+  var active = getActiveProfileId();
+  if (active) removeProfile(active);
+  else {
+    clearActiveTokenKeys();
+    notifyPersistentBackup();
+  }
 }
 
 function authHeaders(extra) {
@@ -290,8 +445,10 @@ function saveConsoleDuid(consoleEntry, duid) {
       changed = true;
     }
   });
-  if (changed)
+  if (changed) {
     localStorage.setItem('consoles', JSON.stringify(list));
+    notifyPersistentBackup();
+  }
 }
 
 function parsePsnDevices(json, platform) {
@@ -388,6 +545,23 @@ function createSession() {
   });
 }
 
+function startConsoleSession() {
+  var accountId = String(state.accountId || 0);
+  var initialParams = '{"accountId":' + accountId +
+    ',"roomId":0,"sessionId":"' + state.sessionId +
+    '","clientType":"Windows","data1":"' + state.registData1B64 +
+    '","data2":"' + state.registData2B64 + '"}';
+  return postJson(PSN.sessionCommand, {
+    commandDetail: {
+      commandType: 'remotePlay',
+      duid: state.console.duid || '',
+      messageDestination: 'SQS',
+      parameters: { initialParams: initialParams },
+      platform: state.console.ps5 ? 'PS5' : 'PS4'
+    }
+  });
+}
+
 // 2. Open the authenticated push WebSocket — IN WASM (JS can't set the headers).
 function openPushChannel() {
   state.phase = 'ws';
@@ -444,10 +618,32 @@ function sendOffer() {
   return postJson(PSN.sessionMessage(state.sessionId), envelope);
 }
 
+function findCustomData1(value) {
+  if (!value || typeof value !== 'object') return '';
+  if (typeof value.customData1 === 'string') return value.customData1;
+  for (var k in value) {
+    var found = findCustomData1(value[k]);
+    if (found) return found;
+  }
+  return '';
+}
+
+function decodeCustomData1ToB64(customData1) {
+  var round1 = atob(String(customData1 || ''));
+  var round2 = atob(round1);
+  if (round2.length < 16) throw new Error('customData1 was too short');
+  return btoa(round2.slice(0, 16));
+}
+
 // Push notifications arrive here (forwarded from the WASM WS via an event).
 // The console's ACCEPT/RESULT carries its localHashedId, sid, and candidates.
 function onNotification(json) {
   try {
+    var custom = findCustomData1(json);
+    if (custom) {
+      state.customData1B64 = decodeCustomData1ToB64(custom);
+      resolveWaiter('customData1', state.customData1B64);
+    }
     var body = extractBody(json);       // parse "ver=1.0,...,body=<json>"
     if (!body || !body.connRequest) return;
     var cr = body.connRequest;
@@ -496,12 +692,40 @@ function startRemote(punchResult) {
   state.phase = 'starting';
   var c = state.console;
   var s = window.ChiakiTizen.loadStreamSettingsForRemote
-    ? window.ChiakiTizen.loadStreamSettingsForRemote() : { resolution: 3, fps: 30, hdr: false };
-  // ct_session_start_remote(ps5, registKey, rpKey, res, fps, hdr, ctrlFd, dataFd, psIp, psCtrlPort)
-  return window.ChiakiTizen.sessionStartRemote(
-    c.ps5 ? 1 : 0, c.registKeyB64, c.rpKeyB64,
-    s.resolution, s.fps, s.hdr ? 1 : 0,
-    punchResult.ctrlFd, punchResult.dataFd, punchResult.psIp, punchResult.psCtrlPort);
+    ? window.ChiakiTizen.loadStreamSettingsForRemote()
+    : { resolution: 3, fps: 30, bitrateRemote: 0, codec: 'h265' };
+  var codec = 0;
+  if (c.ps5) {
+    if (s.codec === 'h265_hdr') codec = 2;
+    else if (s.codec === 'h265') codec = 1;
+  }
+  var bitrate = s.bitrateRemote || 0;
+  var hdr = c.ps5 && codec === 2;
+  // ct_session_start_remote(ps5, registKey, rpKey, res, fps, hdr, bitrate, codec, ctrlFd, dataFd, psIp, psCtrlPort)
+	  return window.ChiakiTizen.sessionStartRemote(
+	    c.ps5 ? 1 : 0, c.registKeyB64, c.rpKeyB64,
+	    s.resolution, s.fps, hdr ? 1 : 0, bitrate, codec,
+	    punchResult.ctrlFd, punchResult.dataFd, punchResult.psIp, punchResult.psCtrlPort);
+	}
+
+function startAutoRegist(punchResult) {
+  state.phase = 'auto-registering';
+  var c = state.console;
+  if (!c.accountB64) throw new Error('missing PSN Account ID for automatic pairing');
+  if (!state.customData1B64) throw new Error('console did not provide registration data');
+  window.ChiakiTizen.autoRegistStartRemote(
+    c.ps5 ? 1 : 0,
+    c.accountB64,
+    state.registData1B64,
+    state.registData2B64,
+    state.customData1B64,
+    punchResult.ctrlFd,
+    punchResult.dataFd,
+    punchResult.psIp,
+    punchResult.psCtrlPort,
+    state.localRegistIp || ''
+  );
+  return waitFor('autoRegistFinished', 20000);
 }
 
 // --- event -> promise adaptor ----------------------------------------------
@@ -521,12 +745,11 @@ function waitFor(key, timeoutMs) {
 }
 function resolveWaiter(key, val) { if (waiters[key]) waiters[key](val); }
 
-// Full flow orchestrator: session -> push WS -> STUN -> offer -> await answer
-// -> punch (ctrl) -> punch (data) -> start.
-function connectRemote(consoleEntry) {
+function preparePsnConnection(consoleEntry) {
   state.console = consoleEntry;
   state.localCandidates = [];
   state.remoteCandidates = [];
+  resetRegistData();
   var T = window.ChiakiTizen.psnTransport;
 
   return ensureAccessToken()
@@ -538,13 +761,16 @@ function connectRemote(consoleEntry) {
       T.wsOpen(state.token, state.wsFqdn);
       return waitFor('psnWsOpen', 15000);
     })
+    .then(startConsoleSession)
     .then(function() {
       T.stunGather(STUN_HOST, STUN_PORT);
       return waitFor('psnStun', 8000);
     })
     .then(function(stun) {
+      if (stun && stun.error) throw new Error(stun.error);
       if (stun && Array.isArray(stun.candidates))
         state.localCandidates = stun.candidates.map(function(c) {
+          if (!state.localRegistIp && c.ip) state.localRegistIp = c.ip;
           return {
             type: 'STATIC',
             ip: c.ip,
@@ -553,8 +779,13 @@ function connectRemote(consoleEntry) {
             localPort: c.localPort || c.port
           };
         });
-      else if (stun && stun.ip)
+      else if (stun && stun.ip) {
+        state.localRegistIp = stun.ip;
         state.localCandidates.push({ type: 'STATIC', ip: stun.ip, port: stun.port });
+      }
+      return state.customData1B64 || waitFor('customData1', 30000);
+    })
+    .then(function() {
       return sendOffer(); // REST; the console answers over the push WS
     })
     .then(function() { return waitFor('answer', 30000); })
@@ -564,20 +795,32 @@ function connectRemote(consoleEntry) {
       return waitFor('psnPunch', 15000);
     })
     .then(function(ctrl) {
+      if (ctrl && ctrl.error) throw new Error(ctrl.error);
       state._ctrl = ctrl;
       T.punch(candidatesCsv(), 1, state.hashedLocalB64, state.hashedConsoleB64,
         state.sidLocal, state.sidConsole);
       return waitFor('psnPunch', 15000);
     })
     .then(function(data) {
+      if (data && data.error) throw new Error(data.error);
       var sel = (state._ctrl && typeof state._ctrl.selected === 'number') ? state._ctrl.selected : 0;
       var chosen = state.remoteCandidates[sel] || state.remoteCandidates[0] || {};
-      return startRemote({
+      return {
         ctrlFd: state._ctrl.fd, dataFd: data.fd,
         psIp: chosen.ip || '', psCtrlPort: chosen.port || 9295
-      });
+      };
     })
     .catch(function(e) { state.phase = 'error'; throw e; });
+}
+
+// Full flow orchestrator: session -> push WS -> STUN -> offer -> await answer
+// -> punch (ctrl) -> punch (data) -> start.
+function connectRemote(consoleEntry) {
+  return preparePsnConnection(consoleEntry).then(startRemote);
+}
+
+function autoRegister(consoleEntry) {
+  return preparePsnConnection(consoleEntry).then(startAutoRegist);
 }
 
 function candidatesCsv() {
@@ -608,6 +851,14 @@ function onTransportEvent(ev) {
       if (ev.error) resolveWaiter('psnPunch', ev); // let the flow surface the error
       else resolveWaiter('psnPunch', ev);          // { fd, selected, portType }
       break;
+    case 'autoRegistFinished':
+      ev.duid = state.console && state.console.duid || '';
+      resolveWaiter('autoRegistFinished', ev);
+      break;
+    case 'quit':
+      if (state.phase === 'auto-registering' && ev.isError)
+        resolveWaiter('autoRegistFinished', { success: false, error: ev.reason || 'registration session failed' });
+      break;
   }
 }
 
@@ -625,11 +876,16 @@ window.ChiakiPSN = {
   saveToken: saveToken,
   loadToken: loadToken,
   clearTokens: clearTokens,
+  getProfiles: getProfiles,
+  getActiveProfileId: getActiveProfileId,
+  activateProfile: activateProfile,
+  removeProfile: removeProfile,
   loginUrl: loginUrl,
   exchangeRedirect: exchangeRedirect,
   refreshToken: refreshToken,
   ensureAccessToken: ensureAccessToken,
   connectRemote: connectRemote,
+  autoRegister: autoRegister,
   onNotification: onNotification,
   onTransportEvent: onTransportEvent,
   state: state

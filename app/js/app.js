@@ -33,6 +33,12 @@ var REMOTE_PLAY_INTERNET_ENABLED = true;
 var PSN_AUTH_ENABLED = true;
 var PSN_RAW_TOKEN_FIELD_ENABLED = false;
 var LOCAL_PAIRING_ACCOUNT_KEY = 'localPairingAccountId';
+var SPLASH_MIN_VISIBLE_MS = 1400;
+var splashShownAt = (window.__ctSplashShownAt && Number(window.__ctSplashShownAt)) || Date.now();
+var splashHideTimer = null;
+var CODEC_H264 = 0;
+var CODEC_H265 = 1;
+var CODEC_H265_HDR = 2;
 
 function samsungTvYearFromModel(text) {
   text = String(text || '').toUpperCase();
@@ -96,8 +102,15 @@ var state = {
   consoleListSignature: '',
   consoleListRenderTimer: null,
   tvModelYear: null,
+  natProbePending: false,
+  natProbeTimer: null,
+  natStatus: 'idle',
   registTargetHost: null,
+  autoRegistActive: false,
   gamepadTimer: null,
+  currentIsPs5: false,
+  currentIsRemote: false,
+  currentVideoProfile: null,
   remoteButtons: 0       // buttons held via TV remote during stream
 };
 
@@ -112,6 +125,7 @@ function loadConsoles() {
 }
 function saveConsoles(list) {
   localStorage.setItem('consoles', JSON.stringify(list));
+  schedulePersistentBackup();
 }
 // A console's identity is host + PSN account, so the same console can be saved
 // twice under two different accounts (each with its own registration).
@@ -188,7 +202,16 @@ function applyPrefill() {
         saveStreamSettings({
           resolution: cfg.settings.resolution != null ? cfg.settings.resolution : s.resolution,
           fps: cfg.settings.fps != null ? cfg.settings.fps : s.fps,
-          hdr: cfg.settings.hdr != null ? !!cfg.settings.hdr : s.hdr
+          bitrateLocal: cfg.settings.bitrateLocal != null ? cfg.settings.bitrateLocal :
+            (cfg.settings.bitrateLocalPS5 != null ? cfg.settings.bitrateLocalPS5 :
+              (cfg.settings.bitrateLocalPS4 != null ? cfg.settings.bitrateLocalPS4 : s.bitrateLocal)),
+          bitrateRemote: cfg.settings.bitrateRemote != null ? cfg.settings.bitrateRemote :
+            (cfg.settings.bitrateRemotePS5 != null ? cfg.settings.bitrateRemotePS5 :
+              (cfg.settings.bitrateRemotePS4 != null ? cfg.settings.bitrateRemotePS4 : s.bitrateRemote)),
+          codec: cfg.settings.codec ||
+            cfg.settings.codecLocalPS5 ||
+            cfg.settings.codecRemotePS5 ||
+            (cfg.settings.hdr != null ? (cfg.settings.hdr ? 'h265_hdr' : 'h265') : s.codec)
         });
       }
       done();
@@ -225,17 +248,361 @@ function loadStreamSettings() {
   if (res !== 3 && res !== 4) res = 3;
   if (fps !== 30 && fps !== 60) fps = 30;
   var hdr = localStorage.getItem('streamHdr') === '1';
-  return { resolution: res, fps: fps, hdr: hdr };
+  var legacyPs5Codec = hdr ? 'h265_hdr' : 'h265';
+  var localBitrate = loadBitrateSetting('streamBitrateLocal');
+  if (!localStorage.getItem('streamBitrateLocal'))
+    localBitrate = loadBitrateSetting('streamBitrateLocalPS5') ||
+      loadBitrateSetting('streamBitrateLocalPS4');
+  var remoteBitrate = loadBitrateSetting('streamBitrateRemote');
+  if (!localStorage.getItem('streamBitrateRemote'))
+    remoteBitrate = loadBitrateSetting('streamBitrateRemotePS5') ||
+      loadBitrateSetting('streamBitrateRemotePS4');
+  var codec = loadCodecSetting('streamCodec', '', true);
+  if (!codec)
+    codec = loadCodecSetting('streamCodecLocalPS5',
+      localStorage.getItem('streamCodecRemotePS5') || legacyPs5Codec, true);
+  return {
+    resolution: res,
+    fps: fps,
+    hdr: hdr,
+    bitrateLocal: localBitrate,
+    bitrateRemote: remoteBitrate,
+    codec: codec
+  };
 }
 function saveStreamSettings(settings) {
   localStorage.setItem('streamResolution', String(settings.resolution));
   localStorage.setItem('streamFps', String(settings.fps));
-  localStorage.setItem('streamHdr', settings.hdr ? '1' : '0');
+  var codec = normalizeCodecSetting(settings.codec, true);
+  localStorage.setItem('streamHdr', codec === 'h265_hdr' ? '1' : '0');
+  localStorage.setItem('streamBitrateLocal', String(settings.bitrateLocal || 0));
+  localStorage.setItem('streamBitrateRemote', String(settings.bitrateRemote || 0));
+  localStorage.setItem('streamCodec', codec);
+  localStorage.setItem('streamCodecPS4', 'h264');
+  localStorage.setItem('streamCodecLocalPS5', codec);
+  localStorage.setItem('streamCodecRemotePS5', codec);
+}
+
+var TV_BACKUP_ROOT = 'documents';
+var TV_BACKUP_DIR = 'ChiakiTizen';
+var TV_BACKUP_FILE = 'remote-play-state.json';
+var persistentBackupTimer = null;
+var persistentBackupStatus = 'not checked';
+var persistentBackupLastError = '';
+var persistentBackupRestored = false;
+
+var PERSISTENT_BACKUP_KEYS = [
+  'consoles',
+  LOCAL_PAIRING_ACCOUNT_KEY,
+  'psnProfiles',
+  'psnActiveProfileId',
+  'psnOAuthToken',
+  'psnRefreshToken',
+  'psnTokenExpiresAt',
+  'psnRemoteAccountId',
+  'psnRemoteAccountIdDecimal',
+  'psnRemoteOnlineId'
+];
+
+function setPersistentBackupStatus(status, err) {
+  persistentBackupStatus = status;
+  persistentBackupLastError = err && (err.name || err.message || String(err)) || '';
+  if (window.__ctReport)
+    window.__ctReport('storage', 'persistent backup ' + status +
+      (persistentBackupLastError ? ': ' + persistentBackupLastError : ''));
+}
+
+function persistentBackupAvailable() {
+  return !!(window.tizen && tizen.filesystem);
+}
+
+function hasLocalIdentityState() {
+  return !!(
+    localStorage.getItem('consoles') ||
+    localStorage.getItem(LOCAL_PAIRING_ACCOUNT_KEY) ||
+    localStorage.getItem('psnProfiles') ||
+    localStorage.getItem('psnOAuthToken') ||
+    localStorage.getItem('psnRefreshToken')
+  );
+}
+
+function buildPersistentBackupState() {
+  var values = {};
+  PERSISTENT_BACKUP_KEYS.forEach(function(key) {
+    var value = localStorage.getItem(key);
+    if (value != null) values[key] = value;
+  });
+  return {
+    version: 1,
+    app: 'chiaki-tizen',
+    savedAt: new Date().toISOString(),
+    localStorage: values
+  };
+}
+
+function applyPersistentBackupState(data) {
+  if (!data || data.app !== 'chiaki-tizen' || !data.localStorage)
+    return false;
+  PERSISTENT_BACKUP_KEYS.forEach(function(key) {
+    if (Object.prototype.hasOwnProperty.call(data.localStorage, key))
+      localStorage.setItem(key, String(data.localStorage[key]));
+  });
+  return true;
+}
+
+function resolvePersistentBackupDir(mode, ok, fail) {
+  if (!persistentBackupAvailable()) {
+    setPersistentBackupStatus('unavailable');
+    if (fail) fail(new Error('Tizen filesystem unavailable'));
+    return;
+  }
+  try {
+    tizen.filesystem.resolve(TV_BACKUP_ROOT, function(root) {
+      try {
+        root.resolve(TV_BACKUP_DIR, ok, function() {
+          if (mode === 'r') {
+            if (fail) fail(new Error('backup directory missing'));
+            return;
+          }
+          try { ok(root.createDirectory(TV_BACKUP_DIR)); }
+          catch (err) { if (fail) fail(err); }
+        }, mode);
+      } catch (err) {
+        if (fail) fail(err);
+      }
+    }, function(err) {
+      if (fail) fail(err);
+    }, mode);
+  } catch (err) {
+    if (fail) fail(err);
+  }
+}
+
+function writePersistentBackup() {
+  if (persistentBackupTimer) {
+    clearTimeout(persistentBackupTimer);
+    persistentBackupTimer = null;
+  }
+  if (!persistentBackupAvailable()) {
+    setPersistentBackupStatus('unavailable');
+    return;
+  }
+  var text;
+  try {
+    text = JSON.stringify(buildPersistentBackupState());
+  } catch (err) {
+    setPersistentBackupStatus('serialize failed', err);
+    return;
+  }
+  resolvePersistentBackupDir('rw', function(dir) {
+    function writeFile(file) {
+      try {
+        file.openStream('w', function(stream) {
+          try {
+            stream.write(text);
+            stream.close();
+            setPersistentBackupStatus('saved');
+          } catch (err) {
+            try { stream.close(); } catch (e) {}
+            setPersistentBackupStatus('write failed', err);
+          }
+        }, function(err) {
+          setPersistentBackupStatus('open failed', err);
+        }, 'UTF-8');
+      } catch (err) {
+        setPersistentBackupStatus('write failed', err);
+      }
+    }
+    try {
+      dir.resolve(TV_BACKUP_FILE, writeFile, function() {
+        try { writeFile(dir.createFile(TV_BACKUP_FILE)); }
+        catch (err) { setPersistentBackupStatus('create failed', err); }
+      }, 'rw');
+    } catch (err) {
+      setPersistentBackupStatus('resolve file failed', err);
+    }
+  }, function(err) {
+    setPersistentBackupStatus('directory failed', err);
+  });
+}
+
+function schedulePersistentBackup() {
+  if (!persistentBackupAvailable()) return;
+  if (persistentBackupTimer) clearTimeout(persistentBackupTimer);
+  persistentBackupTimer = setTimeout(writePersistentBackup, 800);
+}
+
+function deletePersistentBackup(done) {
+  if (persistentBackupTimer) {
+    clearTimeout(persistentBackupTimer);
+    persistentBackupTimer = null;
+  }
+  if (!persistentBackupAvailable()) {
+    setPersistentBackupStatus('unavailable');
+    if (done) done(false);
+    return;
+  }
+  resolvePersistentBackupDir('rw', function(dir) {
+    try {
+      dir.resolve(TV_BACKUP_FILE, function(file) {
+        try {
+          dir.deleteFile(file.fullPath, function() {
+            setPersistentBackupStatus('deleted');
+            if (done) done(true);
+          }, function(err) {
+            setPersistentBackupStatus('delete failed', err);
+            writePersistentBackup();
+            if (done) done(false);
+          });
+        } catch (err) {
+          setPersistentBackupStatus('delete failed', err);
+          writePersistentBackup();
+          if (done) done(false);
+        }
+      }, function() {
+        setPersistentBackupStatus('no backup file');
+        if (done) done(true);
+      }, 'rw');
+    } catch (err) {
+      setPersistentBackupStatus('delete failed', err);
+      if (done) done(false);
+    }
+  }, function(err) {
+    setPersistentBackupStatus('directory failed', err);
+    if (done) done(false);
+  });
+}
+
+function restorePersistentBackup(done) {
+  if (hasLocalIdentityState()) {
+    setPersistentBackupStatus('local state present');
+    if (done) done(false);
+    return;
+  }
+  if (!persistentBackupAvailable()) {
+    setPersistentBackupStatus('unavailable');
+    if (done) done(false);
+    return;
+  }
+
+  var completed = false;
+  var timeout = setTimeout(function() {
+    if (completed) return;
+    completed = true;
+    setPersistentBackupStatus('restore timed out');
+    if (done) done(false);
+  }, 2500);
+  function finish(restored) {
+    if (completed) return;
+    completed = true;
+    clearTimeout(timeout);
+    if (done) done(!!restored);
+  }
+
+  resolvePersistentBackupDir('r', function(dir) {
+    try {
+      dir.resolve(TV_BACKUP_FILE, function(file) {
+        try {
+          file.openStream('r', function(stream) {
+            try {
+              var text = stream.read(file.fileSize || 0);
+              stream.close();
+              var data = JSON.parse(text || '{}');
+              persistentBackupRestored = applyPersistentBackupState(data);
+              setPersistentBackupStatus(persistentBackupRestored ? 'restored' : 'ignored');
+              finish(persistentBackupRestored);
+            } catch (err) {
+              try { stream.close(); } catch (e) {}
+              setPersistentBackupStatus('restore failed', err);
+              finish(false);
+            }
+          }, function(err) {
+            setPersistentBackupStatus('open failed', err);
+            finish(false);
+          }, 'UTF-8');
+        } catch (err) {
+          setPersistentBackupStatus('restore failed', err);
+          finish(false);
+        }
+      }, function() {
+        setPersistentBackupStatus('no backup file');
+        finish(false);
+      }, 'r');
+    } catch (err) {
+      setPersistentBackupStatus('restore failed', err);
+      finish(false);
+    }
+  }, function(err) {
+    setPersistentBackupStatus('directory missing', err);
+    finish(false);
+  });
+}
+
+window.ChiakiTizenBackup = {
+  schedule: schedulePersistentBackup,
+  write: writePersistentBackup,
+  remove: deletePersistentBackup,
+  restore: restorePersistentBackup,
+  status: function() {
+    return {
+      status: persistentBackupStatus,
+      error: persistentBackupLastError,
+      restored: persistentBackupRestored,
+      path: TV_BACKUP_ROOT + '/' + TV_BACKUP_DIR + '/' + TV_BACKUP_FILE
+    };
+  }
+};
+
+function loadBitrateSetting(key) {
+  var kbps = parseInt(localStorage.getItem(key) || '0', 10);
+  if (!isFinite(kbps) || kbps < 0) return 0;
+  if (kbps > 50000) kbps = 50000;
+  return Math.round(kbps / 1000) * 1000;
+}
+
+function normalizeCodecSetting(codec, ps5) {
+  codec = String(codec || '').toLowerCase();
+  if (!ps5) return 'h264';
+  return (codec === 'h264' || codec === 'h265' || codec === 'h265_hdr') ? codec : 'h265';
+}
+
+function loadCodecSetting(key, fallback, ps5) {
+  var stored = localStorage.getItem(key);
+  if (!stored && !fallback) return '';
+  return normalizeCodecSetting(stored || fallback, ps5);
+}
+
+function codecValue(codec, ps5) {
+  codec = normalizeCodecSetting(codec, ps5);
+  if (codec === 'h265_hdr') return CODEC_H265_HDR;
+  if (codec === 'h265') return CODEC_H265;
+  return CODEC_H264;
+}
+
+function streamVideoProfileFor(ps5, remote) {
+  var s = loadStreamSettings();
+  if (ps5) {
+    return {
+      bitrate: remote ? s.bitrateRemote : s.bitrateLocal,
+      codec: codecValue(s.codec, true)
+    };
+  }
+  return {
+    bitrate: remote ? s.bitrateRemote : s.bitrateLocal,
+    codec: CODEC_H264
+  };
 }
 
 function hideSplash() {
   var splash = document.getElementById('app-splash');
-  if (splash) splash.classList.add('hidden');
+  if (!splash || splash.classList.contains('hidden')) return;
+  if (splashHideTimer) return;
+  var elapsed = Date.now() - splashShownAt;
+  var wait = Math.max(0, SPLASH_MIN_VISIBLE_MS - elapsed);
+  splashHideTimer = setTimeout(function() {
+    splash.classList.add('hidden');
+    splashHideTimer = null;
+  }, wait);
 }
 
 function setModuleStatus(text, failed) {
@@ -289,11 +656,13 @@ window.ChiakiTizen = {
       wakeup: Module.cwrap('ct_wakeup', 'number', ['string', 'string', 'number']),
       registStart: Module.cwrap('ct_regist_start', 'number', ['string', 'number', 'string', 'number']),
       registStop: Module.cwrap('ct_regist_stop', null, []),
+      autoRegistStartRemote: Module.cwrap('ct_auto_regist_start_remote', 'number',
+        ['number', 'string', 'string', 'string', 'string', 'number', 'number', 'string', 'number', 'string']),
       // HDR-aware 7-arg entry point. The last param (hdr) was added after the
       // wasm was last rebuilt on some machines, so a matching 6-arg wrapper is
       // kept as a fallback — see sessionStart() below.
       sessionStart: Module.cwrap('ct_session_start', 'number',
-        ['string', 'number', 'string', 'string', 'number', 'number', 'number']),
+        ['string', 'number', 'string', 'string', 'number', 'number', 'number', 'number', 'number']),
       sessionStartNoHdr: Module.cwrap('ct_session_start', 'number',
         ['string', 'number', 'string', 'string', 'number', 'number']),
       sessionStop: Module.cwrap('ct_session_stop', null, []),
@@ -303,7 +672,7 @@ window.ChiakiTizen = {
       // PSN over-the-internet transport (see app/js/psn-signaling.js)
       sessionStartRemote: Module.cwrap('ct_session_start_remote', 'number',
         ['number', 'string', 'string', 'number', 'number', 'number',
-         'number', 'number', 'string', 'number']),
+         'number', 'number', 'number', 'number', 'string', 'number']),
       psnWsOpen: Module.cwrap('ct_psn_ws_open', 'number', ['string', 'string']),
       psnWsClose: Module.cwrap('ct_psn_ws_close', null, []),
       psnStunGather: Module.cwrap('ct_psn_stun_gather', 'number', ['string', 'string']),
@@ -323,9 +692,14 @@ window.ChiakiTizen = {
       }
     };
     window.ChiakiTizen.sessionStartRemote = function(ps5, registKeyB64, rpKeyB64,
-      res, fps, hdr, ctrlFd, dataFd, psIp, psCtrlPort) {
-      return C.sessionStartRemote(ps5, registKeyB64, rpKeyB64, res, fps, hdr,
+      res, fps, hdr, bitrate, codec, ctrlFd, dataFd, psIp, psCtrlPort) {
+      return C.sessionStartRemote(ps5, registKeyB64, rpKeyB64, res, fps, hdr, bitrate, codec,
         ctrlFd, dataFd, psIp, psCtrlPort);
+    };
+    window.ChiakiTizen.autoRegistStartRemote = function(ps5, accountB64, data1B64,
+      data2B64, customData1B64, ctrlFd, dataFd, psIp, psCtrlPort, localIp) {
+      return C.autoRegistStartRemote(ps5, accountB64, data1B64, data2B64, customData1B64,
+        ctrlFd, dataFd, psIp, psCtrlPort, localIp || '');
     };
     window.ChiakiTizen.loadStreamSettingsForRemote = function() {
       return loadStreamSettings();
@@ -350,13 +724,27 @@ window.ChiakiTizen = {
       case 'ready': onCoreReady(); break;
       case 'discoveryHosts': onDiscoveryHosts(ev.hosts || []); break;
       case 'registFinished': onRegistFinished(ev); break;
+      case 'autoRegistFinished':
+        if (window.ChiakiPSN && window.ChiakiPSN.onTransportEvent)
+          window.ChiakiPSN.onTransportEvent(ev);
+        onAutoRegistFinished(ev);
+        break;
       case 'connected': onStreamConnected(); break;
       case 'loginPinRequest': onLoginPinRequest(ev); break;
       case 'nickname':
         if (state.streaming && state.currentHost)
           upsertConsole({ host: state.currentHost, nickname: ev.nickname });
         break;
-      case 'quit': onStreamQuit(ev); break;
+      case 'quit':
+        if (state.autoRegistActive) {
+          if (window.ChiakiPSN && window.ChiakiPSN.onTransportEvent)
+            window.ChiakiPSN.onTransportEvent(ev);
+          if (ev && ev.isError)
+            onAutoRegistFinished({ success: false, error: ev.reason || 'registration session failed' });
+          break;
+        }
+        onStreamQuit(ev);
+        break;
       case 'rumble': onRumble(ev.left, ev.right); break;
       case 'streamStats':
         state.lastStats = { kbps: ev.kbps, fps: ev.fps, width: ev.width,
@@ -368,6 +756,10 @@ window.ChiakiTizen = {
       case 'psnWsClosed':
       case 'psnNotification':
       case 'psnStun':
+        if (ev.type === 'psnStun') onNatProbeStun(ev);
+        if (window.ChiakiPSN && window.ChiakiPSN.onTransportEvent)
+          window.ChiakiPSN.onTransportEvent(ev);
+        break;
       case 'psnPunch':
         if (window.ChiakiPSN && window.ChiakiPSN.onTransportEvent)
           window.ChiakiPSN.onTransportEvent(ev);
@@ -408,6 +800,7 @@ function onCoreReady() {
     startDiscovery();
   });
   renderConsoleList();
+  startNatProbe(false);
   hideSplash();
 }
 
@@ -489,6 +882,41 @@ function moveFocus(delta) {
   els[next].focus();
 }
 
+function focusById(id) {
+  var el = document.getElementById(id);
+  if (!el || el.offsetParent === null) return false;
+  el.focus();
+  return true;
+}
+
+function handleSettingsDirectionalFocus(code) {
+  if (state.screen !== 'settings') return false;
+  var el = document.activeElement;
+  if (!el) return false;
+
+  if (code === KEY.UP) {
+    if (el.id === 'setting-resolution-button')
+      return focusById('btn-settings-video-tab');
+    if (el.id === 'setting-psn-redirect')
+      return focusById('btn-settings-psn-tab');
+  }
+
+  if (code === KEY.DOWN) {
+    if (el.id === 'btn-settings-video-tab')
+      return focusById('setting-resolution-button');
+    if (el.id === 'btn-settings-psn-tab')
+      return focusById('setting-psn-redirect');
+  }
+
+  if (code === KEY.RIGHT && el.id === 'btn-settings-video-tab')
+    return focusById('btn-settings-psn-tab');
+
+  if (code === KEY.LEFT && el.id === 'btn-settings-psn-tab')
+    return focusById('btn-settings-video-tab');
+
+  return false;
+}
+
 var openTvSelectId = null;
 
 function tvSelectButton(id) {
@@ -517,6 +945,35 @@ function syncAllTvSelects() {
   Array.prototype.forEach.call(document.querySelectorAll('.native-select-source'), function(select) {
     syncTvSelect(select.id);
   });
+}
+
+function populateTvSelectMenu(select) {
+  var menu = tvSelectMenu(select.id);
+  if (!menu) return;
+  menu.innerHTML = '';
+  Array.prototype.forEach.call(select.options, function(opt) {
+    var item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'tv-select-option';
+    item.dataset.value = opt.value;
+    item.setAttribute('data-nav', '');
+    item.textContent = opt.text;
+    item.addEventListener('click', function() {
+      select.value = opt.value;
+      syncTvSelect(select.id);
+      if (typeof Event === 'function')
+        select.dispatchEvent(new Event('change'));
+      closeTvSelect(true);
+    });
+    menu.appendChild(item);
+  });
+}
+
+function rebuildTvSelect(id) {
+  var select = document.getElementById(id);
+  if (!select) return;
+  populateTvSelectMenu(select);
+  syncTvSelect(id);
 }
 
 function closeTvSelect(focusButton) {
@@ -550,26 +1007,29 @@ function toggleTvSelect(id) {
   else openTvSelect(id);
 }
 
+function initBitrateOptions() {
+  Array.prototype.forEach.call(document.querySelectorAll('.bitrate-select'), function(select) {
+    if (select.options.length) return;
+    var auto = document.createElement('option');
+    auto.value = '0';
+    auto.text = 'Auto';
+    select.appendChild(auto);
+    for (var mbps = 1; mbps <= 50; mbps++) {
+      var opt = document.createElement('option');
+      opt.value = String(mbps * 1000);
+      opt.text = mbps + ' Mbps';
+      select.appendChild(opt);
+    }
+  });
+}
+
 function initTvSelects() {
+  initBitrateOptions();
   Array.prototype.forEach.call(document.querySelectorAll('.native-select-source'), function(select) {
     var button = tvSelectButton(select.id);
     var menu = tvSelectMenu(select.id);
     if (!button || !menu) return;
-    menu.innerHTML = '';
-    Array.prototype.forEach.call(select.options, function(opt) {
-      var item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'tv-select-option';
-      item.dataset.value = opt.value;
-      item.setAttribute('data-nav', '');
-      item.textContent = opt.text;
-      item.addEventListener('click', function() {
-        select.value = opt.value;
-        syncTvSelect(select.id);
-        closeTvSelect(true);
-      });
-      menu.appendChild(item);
-    });
+    populateTvSelectMenu(select);
     button.addEventListener('click', function() {
       toggleTvSelect(select.id);
     });
@@ -577,11 +1037,13 @@ function initTvSelects() {
   });
 }
 
-// The card currently in focus, whether the card itself or its delete button.
+// The card currently in focus, whether the card itself, a profile row, or its
+// delete button.
 function focusedConsoleCard() {
   var el = document.activeElement;
   if (!el) return null;
   if (el.classList.contains('console-card')) return el;
+  if (el.classList.contains('console-user-row')) return el.closest('.console-card');
   if (el.classList.contains('cc-del')) return el.closest('.console-card');
   return null;
 }
@@ -589,7 +1051,21 @@ function focusedConsoleCard() {
 // up/down leaves the card row cleanly).
 function focusCardIfOnDelete() {
   var el = document.activeElement;
-  if (el && el.classList.contains('cc-del')) el.closest('.console-card').focus();
+  if (el && el.classList.contains('cc-del')) {
+    var row = el.closest('.console-user-row');
+    if (row) row.focus();
+    else el.closest('.console-card').focus();
+  }
+}
+
+function focusedConsoleTarget() {
+  var el = document.activeElement;
+  if (!el) return null;
+  if (el.classList.contains('console-card') || el.classList.contains('console-user-row'))
+    return el;
+  if (el.classList.contains('cc-del'))
+    return el.closest('.console-user-row') || el.closest('.console-card');
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +1073,7 @@ function focusCardIfOnDelete() {
 // ---------------------------------------------------------------------------
 function onDiscoveryHosts(hosts) {
   hosts.forEach(function(h) { state.discovered[h.hostAddr] = h; });
+  updateLocalNetworkChip();
   reconcileSavedConsoleAddresses();
   scheduleConsoleListRender();
 }
@@ -720,38 +1197,86 @@ function reconcileSavedConsoleAddresses() {
     saveConsoles(dedupeConsoles(saved));
 }
 
+function profileDisplayName(c) {
+  return c.label || (c.accountB64 ? ('ID ' + accountIdDecimal(c.accountB64)) : 'Unlabeled user');
+}
+
+function consoleDisplayName(host, d, profiles) {
+  if (d && d.hostName) return d.hostName;
+  for (var i = 0; i < profiles.length; i++) {
+    if (profiles[i].discoveredName) return profiles[i].discoveredName;
+  }
+  for (var j = 0; j < profiles.length; j++) {
+    if (profiles[j].nickname) return profiles[j].nickname;
+  }
+  return host;
+}
+
+function consoleGroupKey(c) {
+  return c.hostId || c.host || entryId(c);
+}
+
 function renderConsoleList() {
+  updateLocalNetworkChip();
   updatePsnStatusChip();
   var listEl = document.getElementById('console-list');
   var saved = loadConsoles();
   var savedHosts = {};
   var entries = [];
+  var groupsByKey = {};
+  var groupOrder = [];
 
   saved.forEach(function(c) {
-    var d = state.discovered[c.host];
-    var psn = c.label || (c.accountB64 ? ('ID ' + accountIdDecimal(c.accountB64)) : '');
-    entries.push({
-      id: entryId(c), host: c.host, name: c.label || c.nickname || c.host,
-      paired: !!c.registKeyB64, ps5: !!c.ps5,
-      state: d ? d.state : 'unknown', app: d ? d.runningApp : '',
-      psn: psn, saved: true
-    });
+    var key = consoleGroupKey(c);
+    var group = groupsByKey[key];
+    if (!group) {
+      group = { key: key, host: c.host, profiles: [], saved: true };
+      groupsByKey[key] = group;
+      groupOrder.push(group);
+    }
+    group.profiles.push(c);
     savedHosts[c.host] = true;
+  });
+  groupOrder.forEach(function(group) {
+    var first = group.profiles[0] || {};
+    var d = state.discovered[group.host];
+    entries.push({
+      key: group.key,
+      host: group.host,
+      name: consoleDisplayName(group.host, d, group.profiles),
+      paired: group.profiles.some(function(c) { return !!c.registKeyB64; }),
+      ps5: !!first.ps5,
+      state: d ? d.state : 'unknown',
+      app: d ? d.runningApp : '',
+      saved: true,
+      profiles: group.profiles.map(function(c) {
+        return {
+          id: entryId(c),
+          host: c.host,
+          ps5: !!c.ps5,
+          paired: !!c.registKeyB64,
+          label: profileDisplayName(c)
+        };
+      })
+    });
   });
   Object.keys(state.discovered).forEach(function(host) {
     if (savedHosts[host]) return; // already shown as a saved entry
     var d = state.discovered[host];
     entries.push({
-      host: host, name: d.hostName || host, paired: false,
+      key: host, host: host, name: d.hostName || host, paired: false,
       ps5: /ps5/i.test(d.hostType || ''), state: d.state, app: d.runningApp,
-      psn: '', saved: false
+      saved: false, profiles: []
     });
   });
 
   var signature = JSON.stringify(entries.map(function(e) {
     return [
-      e.id || '', e.host || '', e.name || '', e.paired ? 1 : 0,
-      e.ps5 ? 1 : 0, e.state || '', e.app || '', e.psn || '', e.saved ? 1 : 0
+      e.key || '', e.host || '', e.name || '', e.paired ? 1 : 0,
+      e.ps5 ? 1 : 0, e.state || '', e.app || '', e.saved ? 1 : 0,
+      e.profiles.map(function(p) {
+        return [p.id || '', p.label || '', p.paired ? 1 : 0].join(':');
+      }).join(',')
     ];
   }));
   if (signature === state.consoleListSignature)
@@ -764,6 +1289,8 @@ function renderConsoleList() {
     ? document.activeElement.dataset.host : '';
   var focusedDelete = document.activeElement &&
     document.activeElement.classList.contains('cc-del');
+  var focusedProfile = document.activeElement &&
+    document.activeElement.classList.contains('console-user-row');
 
   listEl.innerHTML = '';
 
@@ -775,44 +1302,71 @@ function renderConsoleList() {
 
   var STATE_LABEL = { ready: 'Ready', standby: 'Standby', unknown: 'Offline' };
   entries.forEach(function(e) {
+    var multiProfile = e.profiles.length > 1;
+    var firstProfile = e.profiles[0];
     var card = document.createElement('div');
     card.className = 'console-card';
     card.tabIndex = 0;
     card.dataset.host = e.host;
     card.dataset.ps5 = e.ps5 ? '1' : '0';
     card.dataset.paired = e.paired ? '1' : '0';
-    if (e.id) card.dataset.id = e.id;
+    card.dataset.multiProfile = multiProfile ? '1' : '0';
+    if (!multiProfile && firstProfile) card.dataset.id = firstProfile.id;
     var stateLabel = STATE_LABEL[e.state] || e.state;
+    var consoleType = e.ps5 ? 'PS5' : 'PS4';
     card.innerHTML =
-      '<span class="cc-badge ' + (e.ps5 ? 'ps5' : 'ps4') + '">' +
-        (e.ps5 ? 'PS5' : 'PS4') + '</span>' +
-      '<span class="cc-main">' +
-        '<span class="name">' + escapeHtml(e.name) + '</span>' +
-        '<span class="addr">' + escapeHtml(e.host) +
-          (e.app ? ' &middot; ' + escapeHtml(e.app) : '') + '</span>' +
-        (e.psn ? '<span class="cc-psn">' + escapeHtml(e.psn) + '</span>' : '') +
-      '</span>' +
-      '<span class="cc-tags">' +
-        (e.paired
-          ? '<span class="cc-paired">Paired</span>'
-          : '<span class="cc-pair-hint">Pair</span>') +
-        '<span class="state ' + e.state + '">' + stateLabel + '</span>' +
-        (e.saved
-          ? '<button class="cc-del" tabindex="0" data-del="' + escapeHtml(e.id) +
-            '" aria-label="Remove this console">&#10005;</button>'
-          : '') +
-      '</span>';
+      '<div class="cc-header">' +
+        '<span class="cc-badge ' + (e.ps5 ? 'ps5' : 'ps4') +
+          '" aria-label="' + consoleType + '" title="' + consoleType + '">' +
+          consoleType + '</span>' +
+        '<span class="cc-main">' +
+          '<span class="name">' + escapeHtml(e.name) + '</span>' +
+          '<span class="addr">' + escapeHtml(e.host) +
+            (e.app ? ' &middot; ' + escapeHtml(e.app) : '') + '</span>' +
+          (!multiProfile && firstProfile
+            ? '<span class="cc-psn">' + escapeHtml(firstProfile.label) + '</span>'
+            : '') +
+        '</span>' +
+        '<span class="cc-tags">' +
+          (multiProfile
+            ? '<span class="cc-paired">' + e.profiles.length + ' users</span>'
+            : (e.paired
+              ? '<span class="cc-paired">Paired</span>'
+              : '<span class="cc-pair-hint">Pair</span>')) +
+          '<span class="state ' + e.state + '">' + stateLabel + '</span>' +
+          (e.saved && !multiProfile && firstProfile
+            ? '<button class="cc-del" tabindex="0" data-id="' + escapeHtml(firstProfile.id) +
+              '" data-del="' + escapeHtml(firstProfile.id) +
+              '" aria-label="Remove this user">&#10005;</button>'
+            : '') +
+        '</span>' +
+      '</div>' +
+      (multiProfile
+        ? '<div class="cc-users">' + e.profiles.map(function(p) {
+          return '<div class="console-user-row" tabindex="0" data-nav data-id="' +
+              escapeHtml(p.id) + '" data-host="' + escapeHtml(p.host) + '" data-ps5="' +
+              (p.ps5 ? '1' : '0') + '" data-paired="' + (p.paired ? '1' : '0') + '">' +
+              '<span class="cc-user-name">' + escapeHtml(p.label) + '</span>' +
+              '<span class="cc-user-status">' + (p.paired ? 'Paired' : 'Pair') + '</span>' +
+              '<button class="cc-del" tabindex="0" data-id="' + escapeHtml(p.id) +
+                '" data-del="' + escapeHtml(p.id) +
+                '" aria-label="Remove ' + escapeHtml(p.label) + '">&#10005;</button>' +
+            '</div>';
+        }).join('') + '</div>'
+        : '');
     listEl.appendChild(card);
   });
 
   if (focusedId || focusedHost) {
-    var selector = focusedId
-      ? '.console-card[data-id="' + cssEscape(focusedId) + '"]'
-      : '.console-card[data-host="' + cssEscape(focusedHost) + '"]';
+    var selector = focusedId && focusedProfile
+      ? '.console-user-row[data-id="' + cssEscape(focusedId) + '"]'
+      : (focusedId
+        ? '.console-card[data-id="' + cssEscape(focusedId) + '"], .console-user-row[data-id="' + cssEscape(focusedId) + '"]'
+        : '.console-card[data-host="' + cssEscape(focusedHost) + '"]');
     var restored = listEl.querySelector(selector);
     if (restored) {
       if (focusedDelete) {
-        var del = restored.querySelector('.cc-del');
+        var del = restored.classList.contains('cc-del') ? restored : restored.querySelector('.cc-del');
         if (del) restored = del;
       }
       restored.focus();
@@ -832,8 +1386,14 @@ function cssEscape(s) {
 }
 
 function activateConsole(card) {
-  var host = card.dataset.host;
-  var ps5 = card.dataset.ps5 === '1';
+  if (card.classList.contains('console-card') && card.dataset.multiProfile === '1') {
+    var row = card.querySelector('.console-user-row');
+    if (row) row.focus();
+    return;
+  }
+  var host = card.dataset.host || (card.closest('.console-card') && card.closest('.console-card').dataset.host);
+  var ps5 = card.dataset.ps5 === '1' ||
+    (card.closest('.console-card') && card.closest('.console-card').dataset.ps5 === '1');
   if (card.dataset.paired !== '1') {
     // Prefilled-but-unpaired: carry its account/label into the pairing form so
     // only the 8-digit code is left to enter.
@@ -863,6 +1423,9 @@ function startRemoteStream(saved) {
   overlay.classList.remove('hidden', 'error');
   document.getElementById('stream-status').textContent = 'Connecting over the internet…';
   state.currentHost = host;
+  state.currentIsPs5 = ps5;
+  state.currentIsRemote = true;
+  state.currentVideoProfile = streamVideoProfileFor(ps5, true);
   resetHud();
   state.streaming = true;
   startGamepadLoop();
@@ -891,6 +1454,19 @@ function wakeConsole(card) {
 // ---------------------------------------------------------------------------
 // Pairing
 // ---------------------------------------------------------------------------
+function autoRegistAvailable(host) {
+  if (!host || !state.discovered[host] || !discoveredOnlineState(host)) return false;
+  if (!window.ChiakiPSN || !window.ChiakiPSN.loadToken || !window.ChiakiPSN.autoRegister) return false;
+  return !!window.ChiakiPSN.loadToken();
+}
+
+function updateAutoRegistButton() {
+  var btn = document.getElementById('btn-regist-auto');
+  if (!btn) return;
+  var host = document.getElementById('regist-host').value.trim();
+  btn.classList.toggle('hidden', !autoRegistAvailable(host));
+}
+
 function openRegist(host, ps5, account, label) {
   state.registTargetHost = host || '';
   document.getElementById('regist-host').value = host || '';
@@ -901,6 +1477,7 @@ function openRegist(host, ps5, account, label) {
   document.getElementById('regist-label').value = label || '';
   document.getElementById('regist-status').textContent = '';
   updateAccountHint();
+  updateAutoRegistButton();
   show('regist');
 }
 
@@ -950,6 +1527,57 @@ function submitRegist() {
   C.registStart(host, ps5 ? 1 : 0, account, pin >>> 0);
 }
 
+function submitAutoRegist() {
+  if (!state.moduleReady) {
+    var waitStatus = document.getElementById('regist-status');
+    waitStatus.textContent = moduleWaitMessage();
+    waitStatus.className = state.moduleFailed ? 'status err' : 'status';
+    return;
+  }
+
+  var host = document.getElementById('regist-host').value.trim();
+  var ps5 = document.getElementById('regist-target').value === 'ps5';
+  var account = document.getElementById('regist-account').value.trim();
+  var label = document.getElementById('regist-label').value.trim();
+  var status = document.getElementById('regist-status');
+  var d = state.discovered[host];
+
+  if (!host || !account || !d) {
+    status.textContent = 'Automatic pairing needs a local discovered console and PSN Account ID.';
+    status.className = 'status err';
+    return;
+  }
+  if (!window.ChiakiPSN || !window.ChiakiPSN.autoRegister || !window.ChiakiPSN.loadToken()) {
+    status.textContent = 'Sign in to PSN first, then try automatic pairing again.';
+    status.className = 'status err';
+    return;
+  }
+
+  status.textContent = 'Pairing automatically via PSN...';
+  status.className = 'status';
+  localStorage.setItem(LOCAL_PAIRING_ACCOUNT_KEY, account);
+  state.registTargetHost = host;
+  state.registTargetPs5 = ps5;
+  state.registTargetAccount = account;
+  state.registTargetLabel = label;
+  state.registTargetDuid = '';
+  state.autoRegistActive = true;
+  window.ChiakiPSN.autoRegister({
+    host: host,
+    ps5: ps5,
+    accountB64: account,
+    duid: '',
+    nickname: d.hostName || '',
+    label: label,
+    discoveredName: d.hostName || ''
+  }).catch(function(e) {
+    onAutoRegistFinished({
+      success: false,
+      error: e && e.message ? e.message : 'automatic pairing failed'
+    });
+  });
+}
+
 function onRegistFinished(ev) {
   var status = document.getElementById('regist-status');
   C.registStop();
@@ -975,19 +1603,219 @@ function onRegistFinished(ev) {
   }
 }
 
+function onAutoRegistFinished(ev) {
+  if (!state.autoRegistActive && !(ev && ev.success)) return;
+  var status = document.getElementById('regist-status');
+  state.autoRegistActive = false;
+  if (C) C.sessionStop();
+  if (ev.success) {
+    upsertConsole({
+      host: state.registTargetHost,
+      ps5: !!state.registTargetPs5,
+      nickname: ev.serverNickname,
+      registKeyB64: ev.registKeyB64,
+      rpKeyB64: ev.rpKeyB64,
+      target: ev.target,
+      accountB64: state.registTargetAccount || '',
+      label: state.registTargetLabel || '',
+      duid: ev.duid || state.registTargetDuid || ''
+    });
+    status.textContent = 'Paired automatically with ' + (ev.serverNickname || 'console') + '.';
+    status.className = 'status ok';
+    restartDiscovery();
+    setTimeout(function() { show('consoles'); renderConsoleList(); }, 1200);
+  } else {
+    status.textContent = 'Automatic pairing failed: ' +
+      (ev.error || 'check PSN sign-in and Remote Play settings.');
+    status.className = 'status err';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 var resetDataArmedUntil = 0;
 var settingsPage = 'video';
+var NAT_STUN_HOST = 'stun.l.google.com';
+var NAT_STUN_PORT = '19302';
 
 function hasPsnRemoteLogin() {
   return !!(localStorage.getItem('psnOAuthToken') || localStorage.getItem('psnRefreshToken'));
 }
 
+function updateLocalNetworkChip() {
+  var chip = document.getElementById('local-network-chip');
+  if (!chip) return;
+  chip.classList.toggle('hidden', Object.keys(state.discovered).length === 0);
+}
+
+function resetNatProbe() {
+  state.natProbePending = false;
+  if (state.natProbeTimer) {
+    clearTimeout(state.natProbeTimer);
+    state.natProbeTimer = null;
+  }
+  state.natStatus = 'idle';
+  updateNatStatusChip();
+}
+
+function updateNatStatusChip() {
+  var chip = document.getElementById('nat-status-chip');
+  if (!chip) return;
+  ['nat-checking', 'nat-good', 'nat-moderate', 'nat-blocked'].forEach(function(cls) {
+    chip.classList.remove(cls);
+  });
+
+  var visible = hasPsnRemoteLogin() && state.natStatus !== 'idle';
+  chip.classList.toggle('hidden', !visible);
+  if (!visible) return;
+
+  var labels = {
+    checking: 'NAT: checking',
+    good: 'NAT: Good',
+    moderate: 'NAT: Moderate',
+    blocked: 'NAT: Blocked'
+  };
+  chip.textContent = labels[state.natStatus] || 'NAT: unknown';
+  chip.classList.add('nat-' + state.natStatus);
+}
+
+function classifyNatProbe(ev) {
+  if (!ev || ev.error) return 'blocked';
+  var candidates = Array.isArray(ev.candidates) ? ev.candidates : [];
+  if (!candidates.length && ev.ip)
+    candidates = [{ ip: ev.ip, port: ev.port, localPort: ev.localPort }];
+  if (!candidates.length) return 'blocked';
+
+  var allPreserved = candidates.every(function(c) {
+    return c.localPort && c.port && Number(c.localPort) === Number(c.port);
+  });
+  return allPreserved ? 'good' : 'moderate';
+}
+
+function startNatProbe(force) {
+  if (!hasPsnRemoteLogin() || !state.moduleReady || state.streaming ||
+      !(window.ChiakiTizen && window.ChiakiTizen.psnTransport)) {
+    updateNatStatusChip();
+    return;
+  }
+  if (!force && state.natStatus !== 'idle') {
+    updateNatStatusChip();
+    return;
+  }
+
+  state.natStatus = 'checking';
+  state.natProbePending = true;
+  updateNatStatusChip();
+  if (state.natProbeTimer) clearTimeout(state.natProbeTimer);
+  state.natProbeTimer = setTimeout(function() {
+    if (!state.natProbePending) return;
+    state.natProbePending = false;
+    state.natProbeTimer = null;
+    state.natStatus = 'blocked';
+    updateNatStatusChip();
+  }, 9000);
+
+  try {
+    window.ChiakiTizen.psnTransport.stunGather(NAT_STUN_HOST, NAT_STUN_PORT);
+  } catch (e) {
+    state.natProbePending = false;
+    clearTimeout(state.natProbeTimer);
+    state.natProbeTimer = null;
+    state.natStatus = 'blocked';
+    updateNatStatusChip();
+  }
+}
+
+function onNatProbeStun(ev) {
+  if (!state.natProbePending) return;
+  state.natProbePending = false;
+  if (state.natProbeTimer) {
+    clearTimeout(state.natProbeTimer);
+    state.natProbeTimer = null;
+  }
+  state.natStatus = classifyNatProbe(ev);
+  updateNatStatusChip();
+}
+
+function accountKeyForMatch(b64) {
+  var dec = accountIdDecimal(b64);
+  return dec || String(b64 || '').trim();
+}
+
+function currentPsnRemoteAccountB64() {
+  return localStorage.getItem('psnRemoteAccountId') || '';
+}
+
+function currentPsnRemoteLabel() {
+  var onlineId = localStorage.getItem('psnRemoteOnlineId') || '';
+  if (onlineId) return onlineId;
+
+  var accountB64 = currentPsnRemoteAccountB64();
+  var accountDecimal = localStorage.getItem('psnRemoteAccountIdDecimal') || accountIdDecimal(accountB64);
+  var accountKey = accountB64 ? accountKeyForMatch(accountB64) : accountDecimal;
+  var saved = loadConsoles();
+
+  for (var i = 0; i < saved.length; i++) {
+    if (!saved[i].accountB64) continue;
+    if (accountKeyForMatch(saved[i].accountB64) === accountKey)
+      return profileDisplayName(saved[i]);
+  }
+
+  return accountDecimal ? ('ID ' + accountDecimal) : '';
+}
+
+function populatePsnProfileSelect() {
+  var select = document.getElementById('setting-psn-profile');
+  if (!select) return;
+  var profiles = window.ChiakiPSN && window.ChiakiPSN.getProfiles
+    ? window.ChiakiPSN.getProfiles() : [];
+  var activeId = window.ChiakiPSN && window.ChiakiPSN.getActiveProfileId
+    ? window.ChiakiPSN.getActiveProfileId() : '';
+  select.innerHTML = '';
+  if (!profiles.length) {
+    var empty = document.createElement('option');
+    empty.value = '';
+    empty.text = 'No saved PSN logins';
+    select.appendChild(empty);
+  } else {
+    profiles.forEach(function(profile) {
+      var opt = document.createElement('option');
+      opt.value = profile.id;
+      opt.text = profile.label || profile.onlineId ||
+        (profile.accountDecimal ? ('ID ' + profile.accountDecimal) : 'Saved PSN login');
+      select.appendChild(opt);
+    });
+    select.value = activeId || profiles[0].id;
+  }
+  rebuildTvSelect('setting-psn-profile');
+}
+
+function activateSelectedPsnProfile() {
+  var select = document.getElementById('setting-psn-profile');
+  if (!select || !select.value || !window.ChiakiPSN || !window.ChiakiPSN.activateProfile)
+    return;
+  var profile = window.ChiakiPSN.activateProfile(select.value);
+  if (profile && profile.accountB64)
+    localStorage.setItem(LOCAL_PAIRING_ACCOUNT_KEY, profile.accountB64);
+  schedulePersistentBackup();
+  var tokenEl = document.getElementById('setting-psn-token');
+  if (PSN_RAW_TOKEN_FIELD_ENABLED && tokenEl && window.ChiakiPSN.loadToken)
+    tokenEl.value = window.ChiakiPSN.loadToken() || '';
+  updatePsnStatusChip();
+  startNatProbe(true);
+  setSettingsStatus('Active PSN login: ' + currentPsnRemoteLabel(), 'ok');
+}
+
 function updatePsnStatusChip() {
   var chip = document.getElementById('psn-status-chip');
-  if (chip) chip.classList.toggle('hidden', !hasPsnRemoteLogin());
+  if (!chip) return;
+  var signedIn = hasPsnRemoteLogin();
+  chip.classList.toggle('hidden', !signedIn);
+  if (signedIn) {
+    var label = currentPsnRemoteLabel();
+    chip.textContent = label ? ('PSN: ' + label) : 'PSN signed in';
+  }
 }
 
 function showSettingsPage(page, focusPanel) {
@@ -997,11 +1825,13 @@ function showSettingsPage(page, focusPanel) {
   var videoTab = document.getElementById('btn-settings-video-tab');
   var psnTab = document.getElementById('btn-settings-psn-tab');
   var panel = document.querySelector('#screen-settings .settings-panel');
+  var screen = document.getElementById('screen-settings');
   if (videoPage) videoPage.classList.toggle('active', settingsPage === 'video');
   if (psnPage) psnPage.classList.toggle('active', settingsPage === 'psn');
   if (videoTab) videoTab.classList.toggle('active', settingsPage === 'video');
   if (psnTab) psnTab.classList.toggle('active', settingsPage === 'psn');
   if (panel) panel.classList.toggle('psn-page', settingsPage === 'psn');
+  if (screen) screen.classList.toggle('psn-page-active', settingsPage === 'psn');
   document.getElementById('debug-report').classList.add('hidden');
   document.getElementById('settings-status').textContent = '';
   if (focusPanel) {
@@ -1016,6 +1846,9 @@ function openSettings() {
   document.getElementById('setting-resolution').value = String(settings.resolution);
   document.getElementById('setting-fps').value = String(settings.fps);
   document.getElementById('setting-hdr').value = settings.hdr ? '1' : '0';
+  document.getElementById('setting-bitrate-local').value = String(settings.bitrateLocal);
+  document.getElementById('setting-bitrate-remote').value = String(settings.bitrateRemote);
+  document.getElementById('setting-codec').value = settings.codec;
   syncAllTvSelects();
   var authRow = document.getElementById('setting-psn-auth-row');
   if (authRow) authRow.classList.toggle('hidden', !PSN_AUTH_ENABLED || !window.ChiakiPSN);
@@ -1023,11 +1856,13 @@ function openSettings() {
   if (redirectEl) redirectEl.value = '';
   var loginHelper = document.getElementById('psn-login-helper');
   if (loginHelper) loginHelper.classList.add('hidden');
+  hidePsnLoginLink();
   var tokenRow = document.getElementById('setting-psn-token-row');
   if (tokenRow) tokenRow.classList.toggle('hidden', !PSN_RAW_TOKEN_FIELD_ENABLED);
   var tokenEl = document.getElementById('setting-psn-token');
   if (PSN_RAW_TOKEN_FIELD_ENABLED && tokenEl && window.ChiakiPSN)
     tokenEl.value = window.ChiakiPSN.loadToken() || '';
+  populatePsnProfileSelect();
   document.getElementById('debug-report').classList.add('hidden');
   document.getElementById('settings-status').textContent = '';
   showSettingsPage('video', false);
@@ -1050,13 +1885,31 @@ function openPsnLogin() {
   var urlEl = document.getElementById('psn-login-url');
   var helper = document.getElementById('psn-login-helper');
   if (qr)
-    qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=12&data='
+    qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=390x390&margin=16&data='
       + encodeURIComponent(url);
   if (urlEl)
     urlEl.value = url;
+  hidePsnLoginLink();
   if (helper)
     helper.classList.remove('hidden');
-  setSettingsStatus('Scan the QR on another device, sign in with Sony, then paste the redirect URL or code above. SmartThings and Apps2Samsung keyboards can help paste it.', '');
+  setSettingsStatus('', '');
+}
+
+function hidePsnLoginLink() {
+  var urlEl = document.getElementById('psn-login-url');
+  var button = document.getElementById('btn-psn-show-link');
+  if (urlEl) urlEl.classList.add('hidden');
+  if (button) button.textContent = 'Show Link';
+}
+
+function togglePsnLoginLink() {
+  var urlEl = document.getElementById('psn-login-url');
+  var button = document.getElementById('btn-psn-show-link');
+  if (!urlEl || !button) return;
+  var show = urlEl.classList.contains('hidden');
+  urlEl.classList.toggle('hidden', !show);
+  button.textContent = show ? 'Hide Link' : 'Show Link';
+  if (show) urlEl.focus();
 }
 
 function savePsnLogin() {
@@ -1069,8 +1922,13 @@ function savePsnLogin() {
   setSettingsStatus('Saving PSN login...', '');
   window.ChiakiPSN.exchangeRedirect(redirect).then(function(result) {
     if (redirectEl) redirectEl.value = '';
+    populatePsnProfileSelect();
+    if (result && result.accountIdB64)
+      localStorage.setItem(LOCAL_PAIRING_ACCOUNT_KEY, result.accountIdB64);
+    schedulePersistentBackup();
     updatePsnStatusChip();
-    setSettingsStatus('PSN login saved for internet Remote Play. Pairing Account ID unchanged.', 'ok');
+    startNatProbe(true);
+    setSettingsStatus('PSN login saved: ' + currentPsnRemoteLabel(), 'ok');
   }).catch(function(err) {
     setSettingsStatus(err && err.message ? err.message : 'PSN login failed.', 'err');
   });
@@ -1079,23 +1937,29 @@ function savePsnLogin() {
 function clearPsnLogin() {
   if (window.ChiakiPSN && window.ChiakiPSN.clearTokens)
     window.ChiakiPSN.clearTokens();
-  localStorage.removeItem('psnAccountId'); // legacy shared key from test builds
-  localStorage.removeItem('psnAccountIdDecimal');
+  populatePsnProfileSelect();
   var helper = document.getElementById('psn-login-helper');
   if (helper) helper.classList.add('hidden');
+  hidePsnLoginLink();
   var redirectEl = document.getElementById('setting-psn-redirect');
   if (redirectEl) redirectEl.value = '';
   var tokenEl = document.getElementById('setting-psn-token');
   if (tokenEl) tokenEl.value = '';
   updatePsnStatusChip();
-  setSettingsStatus('PSN login cleared.', 'ok');
+  resetNatProbe();
+  schedulePersistentBackup();
+  setSettingsStatus(hasPsnRemoteLogin()
+    ? ('Active PSN login: ' + currentPsnRemoteLabel())
+    : 'PSN login cleared.', 'ok');
 }
 
 function saveSettings() {
   var settings = {
     resolution: parseInt(document.getElementById('setting-resolution').value, 10),
     fps: parseInt(document.getElementById('setting-fps').value, 10),
-    hdr: document.getElementById('setting-hdr').value === '1'
+    bitrateLocal: parseInt(document.getElementById('setting-bitrate-local').value, 10) || 0,
+    bitrateRemote: parseInt(document.getElementById('setting-bitrate-remote').value, 10) || 0,
+    codec: document.getElementById('setting-codec').value
   };
   saveStreamSettings(settings);
   var tokenEl = document.getElementById('setting-psn-token');
@@ -1150,11 +2014,17 @@ function storageSummary() {
     for (var i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
   } catch (e) {}
   keys.sort();
+  var psnProfiles = 0;
+  try {
+    psnProfiles = window.ChiakiPSN && window.ChiakiPSN.getProfiles
+      ? window.ChiakiPSN.getProfiles().length : 0;
+  } catch (e) {}
   return [
     'savedConsoles=' + consoles.length,
     'paired=' + paired,
     'ps5=' + ps5,
     'ps4=' + ps4,
+    'psnProfiles=' + psnProfiles,
     'localStorageKeys=' + keys.join(',')
   ].join(' ');
 }
@@ -1248,6 +2118,8 @@ function showDebugReport() {
   var reportEl = document.getElementById('debug-report');
   var status = document.getElementById('settings-status');
   var settings = loadStreamSettings();
+  var backup = window.ChiakiTizenBackup && window.ChiakiTizenBackup.status
+    ? window.ChiakiTizenBackup.status() : { status: 'unavailable' };
   var lines = [
     'Chiaki for Tizen debug report',
     'generated=' + new Date().toISOString(),
@@ -1260,8 +2132,14 @@ function showDebugReport() {
     'ui performanceMode=' + document.body.classList.contains('perf-ui') +
       ' tvModelYear=' + (state.tvModelYear || 'unknown'),
     'settings resolutionPreset=' + settings.resolution + ' fps=' + settings.fps +
-      ' hdr=' + settings.hdr,
-    'storage ' + storageSummary()
+      ' bitrateLocal=' + settings.bitrateLocal +
+      ' bitrateRemote=' + settings.bitrateRemote +
+      ' codec=' + settings.codec,
+    'storage ' + storageSummary(),
+    'persistentBackup status=' + backup.status +
+      ' restored=' + !!backup.restored +
+      ' path=' + redactDebugText(backup.path || '') +
+      (backup.error ? (' error=' + redactDebugText(backup.error)) : '')
   ];
 
   try {
@@ -1312,7 +2190,9 @@ function resetSavedData() {
     // data after an intentional privacy reset.
     localStorage.setItem('prefillApplied', '1');
   } catch (e) {}
+  deletePersistentBackup();
   resetDataArmedUntil = 0;
+  resetNatProbe();
   state.discovered = {};
   state.currentHost = null;
   state.lastStats = null;
@@ -1320,6 +2200,10 @@ function resetSavedData() {
   document.getElementById('setting-resolution').value = '3';
   document.getElementById('setting-fps').value = '30';
   document.getElementById('setting-hdr').value = '0';
+  document.getElementById('setting-bitrate-local').value = '0';
+  document.getElementById('setting-bitrate-remote').value = '0';
+  document.getElementById('setting-codec').value = 'h265';
+  populatePsnProfileSelect();
   syncAllTvSelects();
   document.getElementById('setting-psn-token').value = '';
   document.getElementById('debug-report').classList.add('hidden');
@@ -1351,6 +2235,8 @@ function startStream(saved) {
   document.getElementById('stream-status').textContent = 'Connecting\u2026';
 
   state.currentHost = host;
+  state.currentIsPs5 = ps5;
+  state.currentIsRemote = false;
   resetHud();
   var streamSettings = loadStreamSettings();
   // sessionStart dispatches asynchronously to the wasm worker (sockets can't
@@ -1359,10 +2245,13 @@ function startStream(saved) {
   // -> onStreamQuit, same path as any runtime disconnect.
   // HDR is PS5-only HEVC Main10; the bridge already ignores it for PS4, but
   // gate here too so a PS4 stream never even requests it.
-  var hdr = (streamSettings.hdr && ps5) ? 1 : 0;
+  var videoProfile = streamVideoProfileFor(ps5, false);
+  state.currentVideoProfile = videoProfile;
+  var hdr = (ps5 && videoProfile.codec === CODEC_H265_HDR) ? 1 : 0;
   try {
     C.sessionStart(host, ps5 ? 1 : 0, saved.registKeyB64, saved.rpKeyB64,
-      streamSettings.resolution, streamSettings.fps, hdr);
+      streamSettings.resolution, streamSettings.fps, hdr,
+      videoProfile.bitrate, videoProfile.codec);
   } catch (e) {
     // Older wasm without the hdr parameter: retry the 6-arg signature. HDR is
     // simply unavailable until the module is rebuilt from the current bridge.cc.
@@ -1376,6 +2265,10 @@ function startStream(saved) {
 function stopStream() {
   if (!state.streaming) return;
   state.streaming = false;
+  state.currentHost = null;
+  state.currentIsPs5 = false;
+  state.currentIsRemote = false;
+  state.currentVideoProfile = null;
   stopGamepadLoop();
   closeHud();
   C.sessionStop();
@@ -1389,6 +2282,10 @@ function onStreamConnected() {
 
 function onStreamQuit(ev) {
   state.streaming = false;
+  state.currentHost = null;
+  state.currentIsPs5 = false;
+  state.currentIsRemote = false;
+  state.currentVideoProfile = null;
   stopGamepadLoop();
   closeHud();
   var overlay = document.getElementById('stream-overlay');
@@ -1414,6 +2311,12 @@ function onLoginPinRequest(ev) {
 // Stream HUD (yellow / "C" remote key): live stats + on-screen PS button
 // ---------------------------------------------------------------------------
 var RES_LABEL = { 3: '720p', 4: '1080p' };
+
+function codecLabel(codec) {
+  if (codec === CODEC_H265_HDR) return 'HDR10';
+  if (codec === CODEC_H265) return 'H.265 HEVC';
+  return 'H.264';
+}
 
 function openHud() {
   state.hudOpen = true;
@@ -1471,15 +2374,21 @@ function populateHud() {
   if (st && typeof st.kbps === 'number')
     brEl.textContent = st.kbps >= 1000 ? (st.kbps / 1000).toFixed(1) + ' Mbps'
                                        : st.kbps + ' kbps';
-  else
-    brEl.textContent = '—';
+  else {
+    var targetBitrate = state.currentVideoProfile && state.currentVideoProfile.bitrate;
+    brEl.textContent = targetBitrate ? ((targetBitrate / 1000) + ' Mbps target') : 'Auto';
+  }
+  var requestedCodec = state.currentVideoProfile ? state.currentVideoProfile.codec
+    : codecValue(s.codec, true);
+  document.getElementById('hud-codec').textContent = codecLabel(requestedCodec);
   var hdrEl = document.getElementById('hud-hdr');
   if (st) {
     hdrEl.textContent = st.hdr ? 'Active (HEVC HDR10)' : 'Off';
     hdrEl.className = st.hdr ? 'ok' : 'off';
   } else {
-    hdrEl.textContent = s.hdr ? 'Requested' : 'Off';
-    hdrEl.className = s.hdr ? '' : 'off';
+    var requestedHdr = requestedCodec === CODEC_H265_HDR;
+    hdrEl.textContent = requestedHdr ? 'Requested' : 'Off';
+    hdrEl.className = requestedHdr ? '' : 'off';
   }
   document.getElementById('hud-ip').textContent = state.currentHost || '—';
 }
@@ -1596,10 +2505,6 @@ REMOTE_MAP[KEY.DOWN] = BTN.DPAD_DOWN;
 REMOTE_MAP[KEY.LEFT] = BTN.DPAD_LEFT;
 REMOTE_MAP[KEY.RIGHT] = BTN.DPAD_RIGHT;
 REMOTE_MAP[KEY.ENTER] = BTN.CROSS;
-REMOTE_MAP[KEY.RED] = BTN.MOON;
-REMOTE_MAP[KEY.GREEN] = BTN.PYRAMID;
-// YELLOW (C) is the HUD toggle during streaming — not a controller button.
-REMOTE_MAP[KEY.BLUE] = BTN.TOUCHPAD;
 REMOTE_MAP[KEY.PLAYPAUSE] = BTN.OPTIONS;
 REMOTE_MAP[KEY.PLAY] = BTN.OPTIONS;
 
@@ -1625,7 +2530,22 @@ document.addEventListener('keydown', function(e) {
       return;
     }
 
-    if (code === KEY.YELLOW) { e.preventDefault(); openHud(); return; }
+    // Keep Samsung color keys app-reserved while streaming too. They should not
+    // silently become PlayStation face buttons.
+    if (code === KEY.BLUE) {
+      e.preventDefault();
+      window.__ctToggleDebugLog && window.__ctToggleDebugLog();
+      return;
+    }
+    if (code === KEY.YELLOW) {
+      e.preventDefault();
+      openHud();
+      return;
+    }
+    if (code === KEY.RED || code === KEY.GREEN) {
+      e.preventDefault();
+      return;
+    }
     if (code === KEY.BACK || code === KEY.EXIT || code === KEY.STOP) {
       e.preventDefault();
       stopStream();
@@ -1645,35 +2565,56 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
+  if (handleSettingsDirectionalFocus(code)) {
+    e.preventDefault();
+    return;
+  }
+
   switch (code) {
     case KEY.UP: e.preventDefault(); focusCardIfOnDelete(); moveFocus(-1); break;
     case KEY.DOWN: e.preventDefault(); focusCardIfOnDelete(); moveFocus(1); break;
     case KEY.LEFT: {
       var dl = document.activeElement;
-      if (dl && dl.classList.contains('cc-del')) { e.preventDefault(); dl.closest('.console-card').focus(); }
+      if (dl && dl.classList.contains('cc-del')) {
+        e.preventDefault();
+        var rowLeft = dl.closest('.console-user-row');
+        if (rowLeft) rowLeft.focus();
+        else dl.closest('.console-card').focus();
+      }
+      else if (dl && dl.classList.contains('console-user-row')) {
+        e.preventDefault();
+        dl.closest('.console-card').focus();
+      }
       else moveFocus(-1);
       break;
     }
     case KEY.RIGHT: {
       var dr = document.activeElement;
-      var del = dr && dr.classList.contains('console-card') && dr.querySelector('.cc-del');
-      if (del) { e.preventDefault(); del.focus(); }
+      var rowRight = dr && dr.classList.contains('console-card') && dr.dataset.multiProfile === '1'
+        ? dr.querySelector('.console-user-row') : null;
+      var del = dr && (dr.classList.contains('console-card') || dr.classList.contains('console-user-row'))
+        ? dr.querySelector('.cc-del') : null;
+      if (rowRight) { e.preventDefault(); rowRight.focus(); }
+      else if (del) { e.preventDefault(); del.focus(); }
       else moveFocus(1);
       break;
     }
     case KEY.ENTER: {
       var el = document.activeElement;
-      if (el && el.classList.contains('console-card')) { e.preventDefault(); activateConsole(el); }
+      if (el && (el.classList.contains('console-card') || el.classList.contains('console-user-row'))) {
+        e.preventDefault();
+        activateConsole(el);
+      }
       else if (el && el.classList.contains('cc-del')) { e.preventDefault(); removeConsoleById(el.dataset.del); }
       break;
     }
     case KEY.GREEN: { // Triangle hint = wake
-      var el2 = focusedConsoleCard();
+      var el2 = focusedConsoleTarget() || focusedConsoleCard();
       if (el2) wakeConsole(el2);
       break;
     }
     case KEY.YELLOW: { // Square hint = pair
-      var el3 = focusedConsoleCard();
+      var el3 = focusedConsoleTarget() || focusedConsoleCard();
       if (el3) openRegist(el3.dataset.host, el3.dataset.ps5 === '1');
       break;
     }
@@ -1719,8 +2660,10 @@ document.getElementById('btn-settings-psn-tab').addEventListener('click', functi
   showSettingsPage('psn', true);
 });
 document.getElementById('btn-regist-go').addEventListener('click', submitRegist);
+document.getElementById('btn-regist-auto').addEventListener('click', submitAutoRegist);
 document.getElementById('btn-regist-cancel').addEventListener('click', function() {
   C && C.registStop();
+  state.autoRegistActive = false;
   show('consoles');
 });
 document.getElementById('btn-settings-save').addEventListener('click', saveSettings);
@@ -1729,7 +2672,14 @@ document.getElementById('btn-reset-data').addEventListener('click', resetSavedDa
 document.getElementById('btn-settings-cancel').addEventListener('click', function() {
   show('consoles');
 });
+document.getElementById('btn-psn-debug-report').addEventListener('click', showDebugReport);
+document.getElementById('btn-psn-reset-data').addEventListener('click', resetSavedData);
+document.getElementById('btn-psn-cancel-settings').addEventListener('click', function() {
+  show('consoles');
+});
 document.getElementById('btn-psn-login').addEventListener('click', openPsnLogin);
+document.getElementById('setting-psn-profile').addEventListener('change', activateSelectedPsnProfile);
+document.getElementById('btn-psn-show-link').addEventListener('click', togglePsnLoginLink);
 document.getElementById('btn-psn-save').addEventListener('click', savePsnLogin);
 document.getElementById('btn-psn-clear').addEventListener('click', clearPsnLogin);
 document.getElementById('btn-login-pin').addEventListener('click', function() {
@@ -1742,10 +2692,13 @@ document.getElementById('btn-login-pin').addEventListener('click', function() {
 document.getElementById('console-list').addEventListener('click', function(e) {
   var del = e.target.closest('.cc-del');
   if (del) { e.stopPropagation(); removeConsoleById(del.dataset.del); return; }
+  var row = e.target.closest('.console-user-row');
+  if (row) { e.stopPropagation(); activateConsole(row); return; }
   var card = e.target.closest('.console-card');
   if (card) activateConsole(card);
 });
 document.getElementById('regist-account').addEventListener('input', updateAccountHint);
+document.getElementById('regist-host').addEventListener('input', updateAutoRegistButton);
 document.getElementById('hud-home').addEventListener('click', pulsePs);
 document.getElementById('hud-close').addEventListener('click', closeHud);
 
@@ -1759,40 +2712,46 @@ if (window.tizen && tizen.tvinputdevice) {
   });
 }
 
-initTvSelects();
-updatePsnStatusChip();
+function bootApp() {
+  initTvSelects();
+  updateLocalNetworkChip();
+  updatePsnStatusChip();
+  updateNatStatusChip();
 
-// Restore remembered local-pairing Account ID. PSN Remote login uses separate
-// storage so it cannot overwrite this field.
-var savedAccount = localStorage.getItem(LOCAL_PAIRING_ACCOUNT_KEY) || '';
-document.getElementById('regist-account').value = savedAccount;
+  // Restore remembered local-pairing Account ID. PSN Remote login uses separate
+  // storage so it cannot overwrite this field.
+  var savedAccount = localStorage.getItem(LOCAL_PAIRING_ACCOUNT_KEY) || '';
+  document.getElementById('regist-account').value = savedAccount;
 
-setModuleStatus(state.moduleStatus, false);
-setTimeout(function() {
-  if (!state.moduleReady) {
-    // TEMPORARY: used to dump the full pipe-joined diagnosticTrail() here,
-    // which duplicated (and visually fought with) the persistent
-    // #ct-debug-log panel in index.html now that it shows the same history
-    // continuously. Keep this short — the full trail is already on screen.
-    // Was gated at 12s, which turned out to be a false-alarm deadline: spawning
-    // PTHREAD_POOL_SIZE=16 workers (each importing a ~740KB script) plus real
-    // init can legitimately take longer than that on TV-class hardware, so this
-    // fired and left stale "still loading" text sitting around even on runs
-    // that went on to boot successfully a few seconds later. Bumped to 30s.
-    var message = state.moduleFailed ? state.moduleStatus :
-      'Still loading Chiaki core after 30s — see debug log below.';
-    setModuleStatus(message, false);
-    document.getElementById('console-list').innerHTML =
-      '<p class="empty-hint">' + escapeHtml(message) + '</p>';
-    hideSplash();
-  }
-}, 30000);
+  setModuleStatus(state.moduleStatus, false);
+  setTimeout(function() {
+    if (!state.moduleReady) {
+      // TEMPORARY: used to dump the full pipe-joined diagnosticTrail() here,
+      // which duplicated (and visually fought with) the persistent
+      // #ct-debug-log panel in index.html now that it shows the same history
+      // continuously. Keep this short — the full trail is already on screen.
+      // Was gated at 12s, which turned out to be a false-alarm deadline: spawning
+      // PTHREAD_POOL_SIZE=16 workers (each importing a ~740KB script) plus real
+      // init can legitimately take longer than that on TV-class hardware, so this
+      // fired and left stale "still loading" text sitting around even on runs
+      // that went on to boot successfully a few seconds later. Bumped to 30s.
+      var message = state.moduleFailed ? state.moduleStatus :
+        'Still loading Chiaki core after 30s — see debug log below.';
+      setModuleStatus(message, false);
+      document.getElementById('console-list').innerHTML =
+        '<p class="empty-hint">' + escapeHtml(message) + '</p>';
+      hideSplash();
+    }
+  }, 30000);
 
-applyPrefill();
-show('consoles');
-renderConsoleList();
+  applyPrefill();
+  show('consoles');
+  renderConsoleList();
 
-if (window.Module && Module.runtimeReady)
-  window.ChiakiTizen._onModuleReady();
+  if (window.Module && Module.runtimeReady)
+    window.ChiakiTizen._onModuleReady();
+}
+
+restorePersistentBackup(bootApp);
 
 })();

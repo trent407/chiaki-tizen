@@ -1,0 +1,19 @@
+diff --git a/lib/src/aia.h b/lib/src/aia.h
+index 5344e60..5b2da4c 100644
+--- a/lib/src/aia.h
++++ b/lib/src/aia.h
+@@ -9,7 +9,14 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#if defined(CHIAKI_TIZEN_WASM)
++// The Tizen WASM build does not compile chiaki-ng's curl-backed
++// holepunch/AIA implementation. Keep this internal header usable for
++// common.c, which only needs chiaki_aia_init().
++typedef void CURL;
++#else
+ #include <curl/curl.h>
++#endif
+ 
+ #ifdef __cplusplus
+ extern "C" {

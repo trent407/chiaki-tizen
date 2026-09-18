@@ -31,6 +31,7 @@ include(FetchContent)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(mbedtls
 	GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
 	# chiaki-ng's mbedTLS backend accesses the v2 ECDH context fields.
@@ -122,6 +123,7 @@ set(CHIAKI_CORE_SOURCES
 	${CHIAKI_LIB_SRC}/opusencoder.c
 	${CHIAKI_LIB_SRC}/orientation.c
 	${CHIAKI_LIB_SRC}/bitstream.c
+	${CMAKE_CURRENT_SOURCE_DIR}/src/aia_stub.c
 	# reliable-UDP transport for remote play (no heavy deps; inert until
 	# a holepunch session provides a socket — see note above)
 	${CHIAKI_LIB_SRC}/remote/rudp.c

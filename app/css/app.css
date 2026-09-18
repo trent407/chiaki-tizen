@@ -100,7 +100,22 @@ body.perf-ui .screen.active { animation: none; }
   font-size: 76px; font-weight: 200; letter-spacing: 0.1em;
   text-transform: uppercase; line-height: 1;
 }
-.masthead .sub { grid-column: 2; font-size: 26px; color: var(--text-dim); margin-top: 4px; letter-spacing: 0.02em; }
+.masthead .sub {
+  grid-column: 2; display: flex; align-items: center; gap: 14px;
+  font-size: 26px; color: var(--text-dim); margin-top: 4px; letter-spacing: 0.02em;
+}
+.psn-status-chip {
+  display: inline-flex; align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(76, 214, 161, 0.55);
+  background: rgba(76, 214, 161, 0.12);
+  color: var(--ready);
+  font-size: 18px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
 
 /* ---------- PlayStation glyphs (user artwork in app/icons/) ---------- */
 .glyph-row { display: flex; gap: 18px; margin-bottom: 20px; }
@@ -229,6 +244,7 @@ body.perf-ui .console-card:focus { background: #182033; }
 
 /* ---------- buttons / inputs ---------- */
 .actions { display: flex; gap: 24px; margin-top: 40px; }
+.actions.compact { margin-top: 18px; gap: 16px; flex-wrap: wrap; }
 .tv-btn {
   font: inherit; font-size: 26px; color: var(--text);
   background: var(--panel-hi);
@@ -262,10 +278,70 @@ body.perf-ui .tv-btn { transition: none; }
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 body.perf-ui .tv-input { transition: none; }
+.native-select-source { display: none; }
+.tv-select-wrap {
+  position: relative;
+  width: 560px;
+}
+.tv-select {
+  display: flex; align-items: center; justify-content: space-between;
+  text-align: left;
+  background: linear-gradient(180deg, rgba(44,58,94,0.92), rgba(24,32,50,0.96));
+}
+.tv-select::after {
+  content: "";
+  width: 0; height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-top: 9px solid var(--text-dim);
+  margin-left: 22px;
+  flex: 0 0 auto;
+}
+.tv-select.open {
+  border-color: var(--accent);
+  box-shadow: var(--focus-glow);
+}
+.tv-select-menu {
+  position: absolute;
+  left: 0; top: calc(100% + 8px);
+  z-index: 50;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  background: linear-gradient(180deg, #151d2f, #0d1321);
+  border: 2px solid rgba(94, 124, 205, 0.72);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 22px 44px rgba(0,0,0,0.42), 0 0 0 1px rgba(255,255,255,0.04) inset;
+}
+.tv-select-option {
+  display: block;
+  width: 100%;
+  min-height: 58px;
+  padding: 12px 16px;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 27px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+.tv-select-option.selected {
+  color: #eaf3ff;
+  background: rgba(45,111,247,0.24);
+}
+.tv-select-option:focus {
+  outline: none;
+  color: #fff;
+  background: rgba(45,111,247,0.38);
+  box-shadow: 0 0 0 2px var(--accent) inset;
+  transform: none;
+}
 label { display: block; font-size: 23px; color: var(--text-dim); margin: 22px 0 8px; letter-spacing: 0.02em; }
 h2 { font-size: 52px; font-weight: 300; margin-bottom: 16px; letter-spacing: 0.01em; }
 .explain { font-size: 26px; color: var(--text-dim); max-width: 1040px; line-height: 1.55; }
-.status { margin-top: 28px; font-size: 26px; min-height: 34px; color: var(--text-dim); }
+.status { margin-top: 28px; font-size: 26px; min-height: 34px; color: var(--text-dim); overflow-wrap: anywhere; }
 .field-hint { font-size: 20px; color: var(--text-faint); margin: 4px 0 0; min-height: 24px; }
 .status.err { color: var(--glyph-pink); }
 .status.ok { color: var(--ready); }
@@ -275,8 +351,57 @@ h2 { font-size: 52px; font-weight: 300; margin-bottom: 16px; letter-spacing: 0.0
   display: flex; flex-direction: column;
   width: 1180px; margin-top: 12px;
 }
+.settings-tabs {
+  display: flex; gap: 16px;
+  margin: 6px 0 14px;
+}
+.settings-tab {
+  width: 270px;
+  padding-left: 0;
+  padding-right: 0;
+}
+.settings-tab.active {
+  background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.settings-page { display: none; min-height: 282px; }
+.settings-page.active { display: block; }
+.settings-panel.psn-page .video-settings-only { display: none; }
 .settings-panel .tv-input,
-#regist-target { width: 360px; }
+.settings-panel .tv-select-wrap,
+#regist-form .tv-select-wrap { width: 360px; }
+#regist-form .tv-select { width: 360px; }
+#setting-psn-redirect { width: 760px; }
+.psn-auth { padding-top: 10px; }
+.psn-login-helper {
+  display: flex; align-items: center; gap: 22px;
+  margin-top: 18px;
+}
+.psn-login-helper.hidden { display: none; }
+.psn-login-qr {
+  width: 220px; height: 220px;
+  background: #fff;
+  border: 2px solid var(--panel-edge);
+}
+.psn-login-url {
+  width: 860px; height: 220px;
+  font: 18px/1.35 monospace; color: var(--text);
+  background: rgba(0,0,0,0.32);
+  border: 2px solid var(--panel-edge);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  resize: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.psn-login-tip {
+  margin: 16px 0 0;
+  max-width: 1040px;
+  color: var(--text-dim);
+  font-size: 22px;
+  line-height: 1.35;
+}
 .debug-report {
   width: 1180px; height: 330px; margin-top: 28px;
   font: 20px/1.35 monospace; color: var(--text);

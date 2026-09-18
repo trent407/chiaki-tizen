@@ -50,6 +50,12 @@ stun_status stun_parse_response(const uint8_t *resp, size_t len,
 stun_status stun_query(const char *host, const char *port, int timeout_ms,
 	char *ip_out, size_t ip_size, uint16_t *port_out, uint16_t *local_port_out);
 
+// Same STUN round trip, but over a caller-owned UDP socket. The socket remains
+// open and unconnected so it can be reused for candidate punching after the
+// public mapping has been advertised.
+stun_status stun_query_fd(int fd, const char *host, const char *port, int timeout_ms,
+	char *ip_out, size_t ip_size, uint16_t *port_out, uint16_t *local_port_out);
+
 const char *stun_strerror(stun_status s);
 
 #ifdef __cplusplus

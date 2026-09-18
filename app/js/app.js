@@ -29,6 +29,10 @@ var KEY = {
 };
 
 var C = null; // ccall shorthands, filled when the module is ready
+var REMOTE_PLAY_INTERNET_ENABLED = true;
+var PSN_AUTH_ENABLED = true;
+var PSN_RAW_TOKEN_FIELD_ENABLED = false;
+var LOCAL_PAIRING_ACCOUNT_KEY = 'localPairingAccountId';
 
 function samsungTvYearFromModel(text) {
   text = String(text || '').toUpperCase();
@@ -177,7 +181,7 @@ function applyPrefill() {
         }
         upsertConsole(entry);
       });
-      if (cfg.psnAccountId) localStorage.setItem('psnAccountId', cfg.psnAccountId);
+      if (cfg.psnAccountId) localStorage.setItem(LOCAL_PAIRING_ACCOUNT_KEY, cfg.psnAccountId);
       if (cfg.psnToken && window.ChiakiPSN) window.ChiakiPSN.saveToken(cfg.psnToken);
       if (cfg.settings) {
         var s = loadStreamSettings();
@@ -485,6 +489,94 @@ function moveFocus(delta) {
   els[next].focus();
 }
 
+var openTvSelectId = null;
+
+function tvSelectButton(id) {
+  return document.querySelector('[data-select-for="' + cssEscape(id) + '"]');
+}
+
+function tvSelectMenu(id) {
+  return document.getElementById(id + '-menu');
+}
+
+function syncTvSelect(id) {
+  var select = document.getElementById(id);
+  var button = tvSelectButton(id);
+  var menu = tvSelectMenu(id);
+  if (!select || !button) return;
+  var opt = select.options[select.selectedIndex];
+  button.textContent = opt ? opt.text : '';
+  if (menu) {
+    Array.prototype.forEach.call(menu.querySelectorAll('.tv-select-option'), function(btn) {
+      btn.classList.toggle('selected', btn.dataset.value === select.value);
+    });
+  }
+}
+
+function syncAllTvSelects() {
+  Array.prototype.forEach.call(document.querySelectorAll('.native-select-source'), function(select) {
+    syncTvSelect(select.id);
+  });
+}
+
+function closeTvSelect(focusButton) {
+  if (!openTvSelectId) return;
+  var button = tvSelectButton(openTvSelectId);
+  var menu = tvSelectMenu(openTvSelectId);
+  if (button) button.classList.remove('open');
+  if (menu) menu.classList.add('hidden');
+  var id = openTvSelectId;
+  openTvSelectId = null;
+  if (focusButton && button)
+    button.focus();
+  syncTvSelect(id);
+}
+
+function openTvSelect(id) {
+  closeTvSelect(false);
+  var button = tvSelectButton(id);
+  var menu = tvSelectMenu(id);
+  if (!button || !menu) return;
+  openTvSelectId = id;
+  button.classList.add('open');
+  menu.classList.remove('hidden');
+  syncTvSelect(id);
+  var selected = menu.querySelector('.tv-select-option.selected') || menu.querySelector('.tv-select-option');
+  if (selected) selected.focus();
+}
+
+function toggleTvSelect(id) {
+  if (openTvSelectId === id) closeTvSelect(true);
+  else openTvSelect(id);
+}
+
+function initTvSelects() {
+  Array.prototype.forEach.call(document.querySelectorAll('.native-select-source'), function(select) {
+    var button = tvSelectButton(select.id);
+    var menu = tvSelectMenu(select.id);
+    if (!button || !menu) return;
+    menu.innerHTML = '';
+    Array.prototype.forEach.call(select.options, function(opt) {
+      var item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'tv-select-option';
+      item.dataset.value = opt.value;
+      item.setAttribute('data-nav', '');
+      item.textContent = opt.text;
+      item.addEventListener('click', function() {
+        select.value = opt.value;
+        syncTvSelect(select.id);
+        closeTvSelect(true);
+      });
+      menu.appendChild(item);
+    });
+    button.addEventListener('click', function() {
+      toggleTvSelect(select.id);
+    });
+    syncTvSelect(select.id);
+  });
+}
+
 // The card currently in focus, whether the card itself or its delete button.
 function focusedConsoleCard() {
   var el = document.activeElement;
@@ -629,6 +721,7 @@ function reconcileSavedConsoleAddresses() {
 }
 
 function renderConsoleList() {
+  updatePsnStatusChip();
   var listEl = document.getElementById('console-list');
   var saved = loadConsoles();
   var savedHosts = {};
@@ -753,7 +846,8 @@ function activateConsole(card) {
   var entry = card.dataset.id ? findConsoleById(card.dataset.id) : null;
   if (!entry || !entry.registKeyB64) { openRegist(host, ps5); return; }
   var onLan = !!state.discovered[entry.host];
-  var token = window.ChiakiPSN && window.ChiakiPSN.loadToken && window.ChiakiPSN.loadToken();
+  var token = REMOTE_PLAY_INTERNET_ENABLED
+    && window.ChiakiPSN && window.ChiakiPSN.loadToken && window.ChiakiPSN.loadToken();
   if (!onLan && token) startRemoteStream(entry);
   else startStream(entry);
 }
@@ -775,7 +869,12 @@ function startRemoteStream(saved) {
   window.ChiakiPSN.connectRemote({
     host: host, ps5: ps5,
     registKeyB64: saved.registKeyB64, rpKeyB64: saved.rpKeyB64,
-    duid: saved.duid || '', nickname: saved.nickname
+    id: saved.id || entryId(saved),
+    accountB64: saved.accountB64 || '',
+    duid: saved.duid || '',
+    nickname: saved.nickname,
+    label: saved.label,
+    discoveredName: saved.discoveredName
   }).catch(function(e) {
     onStreamQuit({ reason: 'remote: ' + (e && e.message ? e.message : 'failed') });
   });
@@ -796,8 +895,9 @@ function openRegist(host, ps5, account, label) {
   state.registTargetHost = host || '';
   document.getElementById('regist-host').value = host || '';
   document.getElementById('regist-target').value = ps5 ? 'ps5' : 'ps4';
+  syncTvSelect('regist-target');
   document.getElementById('regist-account').value =
-    (account != null && account !== '') ? account : (localStorage.getItem('psnAccountId') || '');
+    (account != null && account !== '') ? account : (localStorage.getItem(LOCAL_PAIRING_ACCOUNT_KEY) || '');
   document.getElementById('regist-label').value = label || '';
   document.getElementById('regist-status').textContent = '';
   updateAccountHint();
@@ -836,7 +936,7 @@ function submitRegist() {
   }
   status.textContent = 'Pairing\u2026';
   status.className = 'status';
-  localStorage.setItem('psnAccountId', account);
+  localStorage.setItem(LOCAL_PAIRING_ACCOUNT_KEY, account);
   state.registTargetHost = host;
   state.registTargetPs5 = ps5;
   state.registTargetAccount = account;
@@ -879,6 +979,36 @@ function onRegistFinished(ev) {
 // Settings
 // ---------------------------------------------------------------------------
 var resetDataArmedUntil = 0;
+var settingsPage = 'video';
+
+function hasPsnRemoteLogin() {
+  return !!(localStorage.getItem('psnOAuthToken') || localStorage.getItem('psnRefreshToken'));
+}
+
+function updatePsnStatusChip() {
+  var chip = document.getElementById('psn-status-chip');
+  if (chip) chip.classList.toggle('hidden', !hasPsnRemoteLogin());
+}
+
+function showSettingsPage(page, focusPanel) {
+  settingsPage = page === 'psn' ? 'psn' : 'video';
+  var videoPage = document.getElementById('settings-page-video');
+  var psnPage = document.getElementById('settings-page-psn');
+  var videoTab = document.getElementById('btn-settings-video-tab');
+  var psnTab = document.getElementById('btn-settings-psn-tab');
+  var panel = document.querySelector('#screen-settings .settings-panel');
+  if (videoPage) videoPage.classList.toggle('active', settingsPage === 'video');
+  if (psnPage) psnPage.classList.toggle('active', settingsPage === 'psn');
+  if (videoTab) videoTab.classList.toggle('active', settingsPage === 'video');
+  if (psnTab) psnTab.classList.toggle('active', settingsPage === 'psn');
+  if (panel) panel.classList.toggle('psn-page', settingsPage === 'psn');
+  document.getElementById('debug-report').classList.add('hidden');
+  document.getElementById('settings-status').textContent = '';
+  if (focusPanel) {
+    var first = document.querySelector('#settings-page-' + settingsPage + ' [data-nav]');
+    if (first) first.focus();
+  }
+}
 
 function openSettings() {
   resetDataArmedUntil = 0;
@@ -886,12 +1016,79 @@ function openSettings() {
   document.getElementById('setting-resolution').value = String(settings.resolution);
   document.getElementById('setting-fps').value = String(settings.fps);
   document.getElementById('setting-hdr').value = settings.hdr ? '1' : '0';
+  syncAllTvSelects();
+  var authRow = document.getElementById('setting-psn-auth-row');
+  if (authRow) authRow.classList.toggle('hidden', !PSN_AUTH_ENABLED || !window.ChiakiPSN);
+  var redirectEl = document.getElementById('setting-psn-redirect');
+  if (redirectEl) redirectEl.value = '';
+  var loginHelper = document.getElementById('psn-login-helper');
+  if (loginHelper) loginHelper.classList.add('hidden');
+  var tokenRow = document.getElementById('setting-psn-token-row');
+  if (tokenRow) tokenRow.classList.toggle('hidden', !PSN_RAW_TOKEN_FIELD_ENABLED);
   var tokenEl = document.getElementById('setting-psn-token');
-  if (tokenEl && window.ChiakiPSN)
+  if (PSN_RAW_TOKEN_FIELD_ENABLED && tokenEl && window.ChiakiPSN)
     tokenEl.value = window.ChiakiPSN.loadToken() || '';
   document.getElementById('debug-report').classList.add('hidden');
   document.getElementById('settings-status').textContent = '';
+  showSettingsPage('video', false);
   show('settings');
+}
+
+function setSettingsStatus(message, cls) {
+  var status = document.getElementById('settings-status');
+  status.textContent = message || '';
+  status.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function openPsnLogin() {
+  if (!window.ChiakiPSN || !window.ChiakiPSN.loginUrl) {
+    setSettingsStatus('PSN login is not available in this build.', 'err');
+    return;
+  }
+  var url = window.ChiakiPSN.loginUrl();
+  var qr = document.getElementById('psn-login-qr');
+  var urlEl = document.getElementById('psn-login-url');
+  var helper = document.getElementById('psn-login-helper');
+  if (qr)
+    qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=12&data='
+      + encodeURIComponent(url);
+  if (urlEl)
+    urlEl.value = url;
+  if (helper)
+    helper.classList.remove('hidden');
+  setSettingsStatus('Scan the QR on another device, sign in with Sony, then paste the redirect URL or code above. SmartThings and Apps2Samsung keyboards can help paste it.', '');
+}
+
+function savePsnLogin() {
+  var redirectEl = document.getElementById('setting-psn-redirect');
+  var redirect = redirectEl ? redirectEl.value.trim() : '';
+  if (!window.ChiakiPSN || !window.ChiakiPSN.exchangeRedirect) {
+    setSettingsStatus('PSN login is not available in this build.', 'err');
+    return;
+  }
+  setSettingsStatus('Saving PSN login...', '');
+  window.ChiakiPSN.exchangeRedirect(redirect).then(function(result) {
+    if (redirectEl) redirectEl.value = '';
+    updatePsnStatusChip();
+    setSettingsStatus('PSN login saved for internet Remote Play. Pairing Account ID unchanged.', 'ok');
+  }).catch(function(err) {
+    setSettingsStatus(err && err.message ? err.message : 'PSN login failed.', 'err');
+  });
+}
+
+function clearPsnLogin() {
+  if (window.ChiakiPSN && window.ChiakiPSN.clearTokens)
+    window.ChiakiPSN.clearTokens();
+  localStorage.removeItem('psnAccountId'); // legacy shared key from test builds
+  localStorage.removeItem('psnAccountIdDecimal');
+  var helper = document.getElementById('psn-login-helper');
+  if (helper) helper.classList.add('hidden');
+  var redirectEl = document.getElementById('setting-psn-redirect');
+  if (redirectEl) redirectEl.value = '';
+  var tokenEl = document.getElementById('setting-psn-token');
+  if (tokenEl) tokenEl.value = '';
+  updatePsnStatusChip();
+  setSettingsStatus('PSN login cleared.', 'ok');
 }
 
 function saveSettings() {
@@ -902,7 +1099,7 @@ function saveSettings() {
   };
   saveStreamSettings(settings);
   var tokenEl = document.getElementById('setting-psn-token');
-  if (tokenEl && window.ChiakiPSN) {
+  if (PSN_RAW_TOKEN_FIELD_ENABLED && tokenEl && window.ChiakiPSN) {
     var tok = tokenEl.value.trim();
     if (tok) window.ChiakiPSN.saveToken(tok);
   }
@@ -1123,6 +1320,7 @@ function resetSavedData() {
   document.getElementById('setting-resolution').value = '3';
   document.getElementById('setting-fps').value = '30';
   document.getElementById('setting-hdr').value = '0';
+  syncAllTvSelects();
   document.getElementById('setting-psn-token').value = '';
   document.getElementById('debug-report').classList.add('hidden');
   if (window.ChiakiPSN && window.ChiakiPSN.loadToken)
@@ -1441,6 +1639,12 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
+  if (openTvSelectId && (code === KEY.BACK || code === KEY.EXIT)) {
+    e.preventDefault();
+    closeTvSelect(true);
+    return;
+  }
+
   switch (code) {
     case KEY.UP: e.preventDefault(); focusCardIfOnDelete(); moveFocus(-1); break;
     case KEY.DOWN: e.preventDefault(); focusCardIfOnDelete(); moveFocus(1); break;
@@ -1508,6 +1712,12 @@ document.getElementById('btn-add-manual').addEventListener('click', function() {
 document.getElementById('btn-settings').addEventListener('click', function() {
   openSettings();
 });
+document.getElementById('btn-settings-video-tab').addEventListener('click', function() {
+  showSettingsPage('video', true);
+});
+document.getElementById('btn-settings-psn-tab').addEventListener('click', function() {
+  showSettingsPage('psn', true);
+});
 document.getElementById('btn-regist-go').addEventListener('click', submitRegist);
 document.getElementById('btn-regist-cancel').addEventListener('click', function() {
   C && C.registStop();
@@ -1519,6 +1729,9 @@ document.getElementById('btn-reset-data').addEventListener('click', resetSavedDa
 document.getElementById('btn-settings-cancel').addEventListener('click', function() {
   show('consoles');
 });
+document.getElementById('btn-psn-login').addEventListener('click', openPsnLogin);
+document.getElementById('btn-psn-save').addEventListener('click', savePsnLogin);
+document.getElementById('btn-psn-clear').addEventListener('click', clearPsnLogin);
 document.getElementById('btn-login-pin').addEventListener('click', function() {
   var pin = document.getElementById('login-pin').value.trim();
   if (pin) {
@@ -1546,8 +1759,12 @@ if (window.tizen && tizen.tvinputdevice) {
   });
 }
 
-// Restore remembered PSN account id (blank until the user enters their own).
-var savedAccount = localStorage.getItem('psnAccountId') || '';
+initTvSelects();
+updatePsnStatusChip();
+
+// Restore remembered local-pairing Account ID. PSN Remote login uses separate
+// storage so it cannot overwrite this field.
+var savedAccount = localStorage.getItem(LOCAL_PAIRING_ACCOUNT_KEY) || '';
 document.getElementById('regist-account').value = savedAccount;
 
 setModuleStatus(state.moduleStatus, false);

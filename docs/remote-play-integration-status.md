@@ -62,22 +62,19 @@ lines 808-809, 1499-1500, 2498).
   → send OFFER → await the console's answer → punch (ctrl) → punch (data) →
   `ct_session_start_remote`. Driven by a small event→promise adaptor
   (`waitFor`/`resolveWaiter`) over the fire-and-forget `psn*` events.
-- **Paste-token UI**: a "PSN token" field in Settings (saved to localStorage);
-  the console list activates the remote path automatically when a paired console
-  is NOT visible on the LAN and a token is present, else streams locally.
+- **PSN login helper**: Settings opens Sony's Remote Play OAuth login, accepts
+  the returned redirect URL/code, exchanges it for access + refresh tokens, and
+  derives the base64 PSN Account ID the pairing screen expects.
+- **Console DUID lookup/cache**: before remote connect, JS fetches the PSN
+  device list, matches the saved console by cached DUID/name/single-device
+  fallback, and writes the DUID back to the saved console.
+- **Stable STUN/punch sockets**: `ct_psn_stun_gather` now creates and retains
+  CTRL/DATA UDP sockets, advertises those exact STUN mappings, and
+  `ct_psn_punch` reuses the retained sockets for candidate checks.
 
 ## Remaining (on-device / known refinements)
 
-1. **STUN+punch must share one socket** (correctness). Today `ct_psn_stun_gather`
-   and `ct_psn_punch` each create their own UDP socket, so the public mapping we
-   *offer* won't match the socket we *punch* from. On device, reuse a single
-   persistent socket for STUN discovery and the punch (chiaki does). Straight-
-   forward once there's hardware to verify against.
-2. **Console `duid`** — the offer's `to.deviceUniqueId` needs the console's PSN
-   device id, which comes from `chiaki_holepunch_list_devices` (a REST call we
-   don't make yet). Add the device-list fetch and cache the duid on pairing.
-3. **In-app OAuth** — phase 1 pastes a token; real login/refresh is a later pass.
-4. **On-device bring-up** — the only place PSN auth, the Tizen socket extension
+1. **On-device bring-up** — the only place PSN auth, the Tizen socket extension
    (DNS? source-port preservation? non-blocking TLS?), the exact PSN JSON shapes,
    and a real PS5 handshake get validated. This is where the signaling *content*
    (not just mechanics) first meets Sony, and where the real debugging lives.

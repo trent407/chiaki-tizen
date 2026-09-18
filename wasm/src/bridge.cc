@@ -889,6 +889,13 @@ CT_EXPORT int ct_session_start_remote(int ps5,
 		ctrl_fd, data_fd, ip, ps_ctrl_port]() {
 		ChiakiHolepunchRegistInfo rinfo;
 		memset(&rinfo, 0, sizeof(rinfo));
+		if(g_state)
+		{
+			if(g_state->psn_ctrl_fd == ctrl_fd)
+				g_state->psn_ctrl_fd = -1;
+			if(g_state->psn_data_fd == data_fd)
+				g_state->psn_data_fd = -1;
+		}
 		ChiakiHolepunchSession hp = ct_holepunch_bridge_new(
 			ctrl_fd, data_fd, ip.c_str(), (uint16_t)ps_ctrl_port, &rinfo);
 		if(!hp)
@@ -924,6 +931,30 @@ static std::string b64(const uint8_t *data, size_t len)
 		return std::string();
 	out.resize(olen);
 	return out;
+}
+
+static void PsnCloseFd(int &fd)
+{
+	if(fd >= 0)
+	{
+		close(fd);
+		fd = -1;
+	}
+}
+
+static void PsnUdpReset()
+{
+	if(!g_state)
+		return;
+	PsnCloseFd(g_state->psn_ctrl_fd);
+	PsnCloseFd(g_state->psn_data_fd);
+}
+
+static int PsnUdpFdForPortType(int port_type)
+{
+	if(!g_state)
+		return -1;
+	return port_type == 0 ? g_state->psn_ctrl_fd : g_state->psn_data_fd;
 }
 
 // Runs on its own worker thread for the lifetime of the push channel.
@@ -1006,24 +1037,61 @@ CT_EXPORT void ct_psn_ws_close()
 	});
 }
 
-// Discover our public IP:port mapping (candidate) via STUN.
+// Discover our public IP:port mappings (candidates) via STUN, retaining the
+// exact sockets so the later hole-punch uses the same NAT mappings.
 CT_EXPORT int ct_psn_stun_gather(const char *host, const char *port)
 {
 	std::string h = host ? host : "";
 	std::string p = (port && *port) ? port : "3478";
 	DispatchToWorker([h, p]() {
-		char ip[64] = {0};
-		uint16_t pub = 0, local = 0;
-		stun_status s = stun_query(h.c_str(), p.c_str(), 4000, ip, sizeof(ip), &pub, &local);
-		if(s == STUN_OK)
+		PsnUdpReset();
+		if(!g_state)
 		{
-			char fields[192];
-			std::snprintf(fields, sizeof(fields),
-				"\"ip\":\"%s\",\"port\":%u,\"localPort\":%u", ip, pub, local);
-			EmitEvent("psnStun", fields);
+			EmitEvent("psnStun", "\"error\":\"bridge not initialized\"");
+			return;
 		}
-		else
-			EmitEvent("psnStun", std::string("\"error\":\"") + stun_strerror(s) + "\"");
+
+		int ctrl_fd = socket(AF_INET, SOCK_DGRAM, 0);
+		int data_fd = socket(AF_INET, SOCK_DGRAM, 0);
+		if(ctrl_fd < 0 || data_fd < 0)
+		{
+			if(ctrl_fd >= 0)
+				close(ctrl_fd);
+			if(data_fd >= 0)
+				close(data_fd);
+			EmitEvent("psnStun", "\"error\":\"socket failed\"");
+			return;
+		}
+
+		char ctrl_ip[64] = {0}, data_ip[64] = {0};
+		uint16_t ctrl_pub = 0, ctrl_local = 0, data_pub = 0, data_local = 0;
+		stun_status ctrl = stun_query_fd(ctrl_fd, h.c_str(), p.c_str(), 4000,
+			ctrl_ip, sizeof(ctrl_ip), &ctrl_pub, &ctrl_local);
+		stun_status data = stun_query_fd(data_fd, h.c_str(), p.c_str(), 4000,
+			data_ip, sizeof(data_ip), &data_pub, &data_local);
+		if(ctrl != STUN_OK || data != STUN_OK)
+		{
+			close(ctrl_fd);
+			close(data_fd);
+			std::string err = "\"error\":\"";
+			err += ctrl != STUN_OK ? stun_strerror(ctrl) : stun_strerror(data);
+			err += "\"";
+			EmitEvent("psnStun", err);
+			return;
+		}
+
+		g_state->psn_ctrl_fd = ctrl_fd;
+		g_state->psn_data_fd = data_fd;
+		char fields[512];
+		std::snprintf(fields, sizeof(fields),
+			"\"ip\":\"%s\",\"port\":%u,\"localPort\":%u,"
+			"\"candidates\":["
+			"{\"ip\":\"%s\",\"port\":%u,\"localPort\":%u,\"portType\":0},"
+			"{\"ip\":\"%s\",\"port\":%u,\"localPort\":%u,\"portType\":1}]",
+			ctrl_ip, ctrl_pub, ctrl_local,
+			ctrl_ip, ctrl_pub, ctrl_local,
+			data_ip, data_pub, data_local);
+		EmitEvent("psnStun", fields);
 	});
 	return 0;
 }
@@ -1070,10 +1138,10 @@ CT_EXPORT int ct_psn_punch(const char *candidates_csv, int port_type /*0=ctrl,1=
 			cands[k].port = ports[k];
 		}
 
-		int fd = socket(AF_INET, SOCK_DGRAM, 0);
+		int fd = PsnUdpFdForPortType(port_type);
 		if(fd < 0)
 		{
-			EmitEvent("psnPunch", "\"error\":\"socket failed\"");
+			EmitEvent("psnPunch", "\"error\":\"missing retained UDP socket\"");
 			return;
 		}
 
@@ -1101,7 +1169,13 @@ CT_EXPORT int ct_psn_punch(const char *candidates_csv, int port_type /*0=ctrl,1=
 		}
 		else
 		{
-			close(fd);
+			if(g_state)
+			{
+				if(port_type == 0)
+					PsnCloseFd(g_state->psn_ctrl_fd);
+				else
+					PsnCloseFd(g_state->psn_data_fd);
+			}
 			EmitEvent("psnPunch", std::string("\"error\":\"") + punch_strerror(s) + "\"");
 		}
 	});

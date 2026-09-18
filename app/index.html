@@ -215,7 +215,10 @@
   <header class="masthead">
     <img class="app-mark" src="icon_small.png" alt="">
     <img class="app-logo" src="chiaki-tizen-logo.png" alt="Chiaki">
-    <p class="sub">PlayStation Remote Play &middot; local network</p>
+    <p class="sub">
+      PlayStation Remote Play &middot; local network
+      <span id="psn-status-chip" class="psn-status-chip hidden">PSN signed in</span>
+    </p>
   </header>
 
   <div id="console-list" class="console-list">
@@ -245,10 +248,14 @@
   <form id="regist-form" onsubmit="return false;">
     <label>Console IP <input id="regist-host" class="tv-input" data-nav inputmode="numeric" placeholder="192.168.1.20"></label>
     <label>Console type
-      <select id="regist-target" class="tv-input" data-nav>
-        <option value="ps5">PlayStation 5</option>
-        <option value="ps4">PlayStation 4 (&ge; 8.0)</option>
-      </select>
+      <div class="tv-select-wrap">
+        <select id="regist-target" class="native-select-source" tabindex="-1" aria-hidden="true">
+          <option value="ps5">PlayStation 5</option>
+          <option value="ps4">PlayStation 4 (&ge; 8.0)</option>
+        </select>
+        <button id="regist-target-button" type="button" class="tv-input tv-select" data-nav data-select-for="regist-target"></button>
+        <div id="regist-target-menu" class="tv-select-menu hidden"></div>
+      </div>
     </label>
     <label>PSN Account ID (base64) <input id="regist-account" class="tv-input" data-nav placeholder="from psn-account-id tool"></label>
     <p id="regist-account-hint" class="field-hint"></p>
@@ -266,29 +273,69 @@
 <section id="screen-settings" class="screen">
   <h2>Settings</h2>
   <div class="settings-panel">
-    <label>Resolution
-      <select id="setting-resolution" class="tv-input" data-nav>
-        <option value="3">720p</option>
-        <option value="4">1080p</option>
-      </select>
-    </label>
-    <label>Frame rate
-      <select id="setting-fps" class="tv-input" data-nav>
-        <option value="30">30 fps</option>
-        <option value="60">60 fps</option>
-      </select>
-    </label>
-    <label>HDR (PS5 only &middot; experimental)
-      <select id="setting-hdr" class="tv-input" data-nav>
-        <option value="0">Off</option>
-        <option value="1">On — HEVC HDR10</option>
-      </select>
-    </label>
-    <label>PSN token (for remote play over the internet &middot; experimental)
-      <input id="setting-psn-token" class="tv-input" data-nav placeholder="paste PSN OAuth token">
-    </label>
+    <div class="settings-tabs">
+      <button id="btn-settings-video-tab" class="tv-btn settings-tab active" data-nav>Video Settings</button>
+      <button id="btn-settings-psn-tab" class="tv-btn settings-tab" data-nav>PSN Login</button>
+    </div>
+
+    <div id="settings-page-video" class="settings-page active">
+      <label>Resolution
+        <div class="tv-select-wrap">
+          <select id="setting-resolution" class="native-select-source" tabindex="-1" aria-hidden="true">
+            <option value="3">720p</option>
+            <option value="4">1080p</option>
+          </select>
+          <button id="setting-resolution-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-resolution"></button>
+          <div id="setting-resolution-menu" class="tv-select-menu hidden"></div>
+        </div>
+      </label>
+      <label>Frame rate
+        <div class="tv-select-wrap">
+          <select id="setting-fps" class="native-select-source" tabindex="-1" aria-hidden="true">
+            <option value="30">30 fps</option>
+            <option value="60">60 fps</option>
+          </select>
+          <button id="setting-fps-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-fps"></button>
+          <div id="setting-fps-menu" class="tv-select-menu hidden"></div>
+        </div>
+      </label>
+      <label>HDR (PS5 only &middot; experimental)
+        <div class="tv-select-wrap">
+          <select id="setting-hdr" class="native-select-source" tabindex="-1" aria-hidden="true">
+            <option value="0">Off</option>
+            <option value="1">On — HEVC HDR10</option>
+          </select>
+          <button id="setting-hdr-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-hdr"></button>
+          <div id="setting-hdr-menu" class="tv-select-menu hidden"></div>
+        </div>
+      </label>
+    </div>
+
+    <div id="settings-page-psn" class="settings-page">
+      <div id="setting-psn-auth-row" class="psn-auth">
+        <label>PSN redirect URL
+          <input id="setting-psn-redirect" class="tv-input" data-nav placeholder="paste Sony redirect URL or code">
+        </label>
+        <div class="actions compact">
+          <button id="btn-psn-login" class="tv-btn" data-nav>Show PSN login QR</button>
+          <button id="btn-psn-save" class="tv-btn" data-nav>Save PSN login</button>
+          <button id="btn-psn-clear" class="tv-btn danger" data-nav>Clear PSN login</button>
+        </div>
+        <div id="psn-login-helper" class="psn-login-helper hidden">
+          <img id="psn-login-qr" class="psn-login-qr" alt="PSN login QR code">
+          <textarea id="psn-login-url" class="psn-login-url" readonly data-nav></textarea>
+        </div>
+        <p class="psn-login-tip">
+          Scan the QR on another device. Samsung SmartThings and Apps2Samsung keyboards can make copying and pasting the redirect URL easier.
+        </p>
+      </div>
+      <label id="setting-psn-token-row" class="hidden">PSN token (for remote play over the internet &middot; experimental)
+        <input id="setting-psn-token" class="tv-input" data-nav placeholder="paste PSN OAuth token">
+      </label>
+    </div>
+
     <div class="actions">
-      <button id="btn-settings-save" class="tv-btn primary" data-nav>Save</button>
+      <button id="btn-settings-save" class="tv-btn primary video-settings-only" data-nav>Save</button>
       <button id="btn-debug-report" class="tv-btn" data-nav>Send debug report</button>
       <button id="btn-reset-data" class="tv-btn danger" data-nav>Reset saved data</button>
       <button id="btn-settings-cancel" class="tv-btn" data-nav>Cancel</button>

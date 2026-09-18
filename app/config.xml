@@ -27,6 +27,8 @@
     <access origin="https://asm.np.community.playstation.net" subdomains="true"/>
     <access origin="https://auth.api.sonyentertainmentnetwork.com" subdomains="true"/>
     <access origin="https://ca.account.sony.com" subdomains="true"/>
+    <access origin="https://remoteplay.dl.playstation.net" subdomains="true"/>
+    <access origin="https://api.qrserver.com" subdomains="true"/>
 
     <tizen:profile name="tv-samsung"/>
     <tizen:setting screen-orientation="landscape"

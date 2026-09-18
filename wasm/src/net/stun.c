@@ -2,6 +2,7 @@
 
 #include "stun.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +11,7 @@
 #  include <ws2tcpip.h>
 #else
 #  include <sys/socket.h>
+#  include <sys/select.h>
 #  include <sys/time.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
@@ -151,20 +153,37 @@ stun_status stun_query(const char *host, const char *port, int timeout_ms,
 		return STUN_ERR_SOCKET;
 	}
 
-#if !defined(_WIN32)
-	struct timeval tv;
-	tv.tv_sec = timeout_ms / 1000;
-	tv.tv_usec = (timeout_ms % 1000) * 1000;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	stun_status status = stun_query_fd(fd, host, port, timeout_ms,
+		ip_out, ip_size, port_out, local_port_out);
+
+#if defined(_WIN32)
+	closesocket(fd);
+#else
+	close(fd);
 #endif
+	freeaddrinfo(res);
+	return status;
+}
+
+stun_status stun_query_fd(int fd, const char *host, const char *port, int timeout_ms,
+	char *ip_out, size_t ip_size, uint16_t *port_out, uint16_t *local_port_out)
+{
+	if(fd < 0 || !host || !port || !ip_out || !port_out)
+		return STUN_ERR_ARG;
+
+	struct addrinfo hints, *res = NULL;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	if(getaddrinfo(host, port, &hints, &res) != 0 || !res)
+		return STUN_ERR_SOCKET;
 
 	stun_status status = STUN_ERR_IO;
-	// connect() the UDP socket so the OS binds a fixed local port we can read.
-	if(connect(fd, res->ai_addr, res->ai_addrlen) != 0)
-	{
-		status = STUN_ERR_SOCKET;
+	uint8_t req[STUN_HEADER_SIZE];
+	uint8_t txid[STUN_TXID_SIZE];
+	stun_build_request(req, txid);
+	if(sendto(fd, req, sizeof(req), 0, res->ai_addr, res->ai_addrlen) != (long)sizeof(req))
 		goto done;
-	}
 
 	if(local_port_out)
 	{
@@ -174,31 +193,35 @@ stun_status stun_query(const char *host, const char *port, int timeout_ms,
 			*local_port_out = ntohs(local.sin_port);
 	}
 
-	uint8_t req[STUN_HEADER_SIZE];
-	uint8_t txid[STUN_TXID_SIZE];
-	stun_build_request(req, txid);
-	if(send(fd, req, sizeof(req), 0) != (long)sizeof(req))
+	struct timeval tv;
+	tv.tv_sec = timeout_ms / 1000;
+	tv.tv_usec = (timeout_ms % 1000) * 1000;
+	fd_set rfds;
+	FD_ZERO(&rfds);
+	FD_SET(fd, &rfds);
+	int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+	if(sel < 0)
 	{
 		status = STUN_ERR_IO;
 		goto done;
 	}
-
-	uint8_t resp[512];
-	long r = recv(fd, resp, sizeof(resp), 0);
-	if(r <= 0)
+	if(sel == 0)
 	{
 		status = STUN_ERR_TIMEOUT;
+		goto done;
+	}
+
+	uint8_t resp[512];
+	long r = recvfrom(fd, resp, sizeof(resp), 0, NULL, NULL);
+	if(r <= 0)
+	{
+		status = (errno == EAGAIN || errno == EWOULDBLOCK) ? STUN_ERR_TIMEOUT : STUN_ERR_IO;
 		goto done;
 	}
 
 	status = stun_parse_response(resp, (size_t)r, txid, ip_out, ip_size, port_out);
 
 done:
-#if defined(_WIN32)
-	closesocket(fd);
-#else
-	close(fd);
-#endif
 	freeaddrinfo(res);
 	return status;
 }

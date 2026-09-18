@@ -8,20 +8,21 @@
  *     STUN, and the UDP hole-punch. The proven spikes for those live in
  *     wasm/spikes/{wss,stun,punch}/ and are being promoted into the module.
  *
- * STATUS: scaffold. The REST flow and state machine are laid out with the real
- * endpoints and payload templates from chiaki-ng's holepunch.c. Three seams are
- * not yet filled and are marked TODO:
- *   (1) window.ChiakiTizen.psnTransport.* — the ct_psn_* WASM bridge (WS/STUN/
- *       punch). Until it exists, openPushChannel()/runPunch() are stubs.
- *   (2) the signaling crypto: hashed_id derivation, skey, sid assignment
- *       (holepunch.c get_client_addr_* / the connreq builders).
- *   (3) in-app OAuth. For phase 1 the user pastes a token (like the account id).
+ * STATUS: experimental. The OAuth login/account-id helper and signaling state
+ * machine mirror chiaki-ng's Remote Play path. Remaining known work is tracked
+ * in docs/remote-play-integration-status.md, chiefly socket reuse for STUN +
+ * punch, console DUID lookup/cache, and on-device PSN bring-up.
  */
 'use strict';
 
 (function() {
 
 var PSN = {
+  clientId: 'ba495a24-818c-472b-b12d-ff231c1b5745',
+  clientSecret: 'mvaiZkRsAsI1IBkY',
+  redirectUri: 'https://remoteplay.dl.playstation.net/remoteplay/redirect',
+  scope: 'psn:clientapp referenceDataService:countryConfig.read pushNotification:webSocket.desktop.connect sessionManager:remotePlaySession.system.update',
+  tokenUrl: 'https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/token',
   deviceList: 'https://web.np.playstation.com/api/cloudAssistedNavigation/v2/users/me/clients',
   wsFqdn:     'https://mobile-pushcl.np.communication.playstation.net/np/serveraddr?version=2.1&fields=keepAliveStatus&keepAliveStatusType=3',
   sessionCreate: 'https://web.np.playstation.com/api/sessionManager/v1/remotePlaySessions',
@@ -34,7 +35,7 @@ var PSN = {
 };
 
 var state = {
-  token: null,        // PSN OAuth2 bearer token (phase 1: pasted)
+  token: null,        // PSN OAuth2 bearer token saved via Sony login
   accountId: null,    // int64 as string
   sessionId: null,    // remote play session UUID
   wsFqdn: null,
@@ -70,9 +71,177 @@ function bytesToB64(u8) {
 }
 var ZERO_SKEY_B64 = bytesToB64(new Uint8Array(16)); // 16 zero bytes
 
-// --- token (phase 1: paste; phase 2: OAuth) --------------------------------
+// --- PSN OAuth --------------------------------------------------------------
+function formEncode(obj) {
+  var parts = [];
+  for (var k in obj)
+    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]));
+  return parts.join('&');
+}
+
+function basicAuthHeader() {
+  return 'Basic ' + btoa(PSN.clientId + ':' + PSN.clientSecret);
+}
+
+function loginUrl() {
+  return 'https://auth.api.sonyentertainmentnetwork.com/2.0/oauth/authorize?'
+    + formEncode({
+      service_entity: 'urn:service-entity:psn',
+      response_type: 'code',
+      client_id: PSN.clientId,
+      redirect_uri: PSN.redirectUri,
+      scope: PSN.scope,
+      request_locale: 'en_US',
+      ui: 'pr',
+      service_logo: 'ps',
+      layout_type: 'popup',
+      smcid: 'remoteplay',
+      prompt: 'always',
+      PlatformPrivacyWs1: 'minimal'
+    }) + '&';
+}
+
+function parseRedirectCode(input) {
+  input = String(input || '').trim();
+  if (!input) throw new Error('missing redirect URL');
+  var m = input.match(/[?&]code=([^&#]+)/);
+  if (m && m[1]) return decodeURIComponent(m[1].replace(/\+/g, ' '));
+  if (/^[A-Za-z0-9._~-]+$/.test(input)) return input;
+  throw new Error('could not find code in redirect URL');
+}
+
+function saveTokenBundle(json) {
+  if (!json || !json.access_token)
+    throw new Error('PSN token response did not include an access token');
+  saveToken(json.access_token);
+  if (json.refresh_token)
+    localStorage.setItem('psnRefreshToken', json.refresh_token);
+  var expiresIn = parseInt(json.expires_in, 10);
+  if (expiresIn > 0)
+    localStorage.setItem('psnTokenExpiresAt', String(Date.now() + Math.max(0, expiresIn - 60) * 1000));
+  return json.access_token;
+}
+
+function saveAccountIds(decimal) {
+  decimal = String(decimal || '').replace(/\D/g, '');
+  if (!decimal) return '';
+  var b64 = decimalAccountIdToBase64(decimal);
+  if (b64) localStorage.setItem('psnRemoteAccountId', b64);
+  localStorage.setItem('psnRemoteAccountIdDecimal', decimal);
+  state.accountId = decimal;
+  return b64;
+}
+
+function tokenPost(body) {
+  return fetch(PSN.tokenUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: basicAuthHeader(),
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: formEncode(body)
+  }).then(function(r) {
+    if (!r.ok) throw new Error('PSN token request failed: ' + r.status);
+    return r.json();
+  }).then(saveTokenBundle);
+}
+
+function exchangeRedirect(input) {
+  var code = parseRedirectCode(input);
+  return tokenPost({
+    grant_type: 'authorization_code',
+    code: code,
+    scope: PSN.scope,
+    redirect_uri: PSN.redirectUri
+  }).then(function(accessToken) {
+    return fetchAccountId(accessToken).then(function(accountIdB64) {
+      return { token: accessToken, accountIdB64: accountIdB64 };
+    });
+  });
+}
+
+function refreshToken() {
+  var refresh = localStorage.getItem('psnRefreshToken') || '';
+  if (!refresh) return Promise.reject(new Error('no PSN refresh token saved'));
+  return tokenPost({
+    grant_type: 'refresh_token',
+    refresh_token: refresh,
+    scope: PSN.scope,
+    redirect_uri: PSN.redirectUri
+  });
+}
+
+function ensureAccessToken() {
+  var token = loadToken();
+  if (!token) return Promise.reject(new Error('no PSN login saved'));
+  var expiry = parseInt(localStorage.getItem('psnTokenExpiresAt') || '0', 10);
+  if (expiry && Date.now() > expiry)
+    return refreshToken();
+  return Promise.resolve(token);
+}
+
+function fetchAccountId(accessToken) {
+  return fetch(PSN.tokenUrl + '/' + encodeURIComponent(accessToken), {
+    headers: {
+      Authorization: basicAuthHeader(),
+      Accept: 'application/json'
+    }
+  }).then(function(r) {
+    if (!r.ok) throw new Error('PSN account request failed: ' + r.status);
+    return r.json();
+  }).then(function(json) {
+    return saveAccountIds(json && json.user_id);
+  });
+}
+
+function decimalAccountIdToBase64(decimal) {
+  decimal = String(decimal || '').replace(/\D/g, '');
+  if (!decimal) return '';
+  var bytes = [];
+  for (var i = 0; i < 8; i++) {
+    var q = '';
+    var rem = 0;
+    for (var j = 0; j < decimal.length; j++) {
+      var n = rem * 10 + (decimal.charCodeAt(j) - 48);
+      var d = Math.floor(n / 256);
+      rem = n % 256;
+      if (q || d) q += String(d);
+    }
+    bytes.push(rem);
+    decimal = q || '0';
+  }
+  return bytesToB64(new Uint8Array(bytes));
+}
+
+function accountIdBase64ToDecimal(b64) {
+  var bin;
+  try { bin = atob(b64 || ''); } catch (e) { return ''; }
+  if (!bin) return '';
+  var bytes = [];
+  for (var i = 0; i < bin.length; i++) bytes.push(bin.charCodeAt(i) & 0xff);
+  bytes.reverse();
+  var dec = '0';
+  for (var b = 0; b < bytes.length; b++) {
+    var carry = bytes[b];
+    var out = '';
+    for (var j = dec.length - 1; j >= 0; j--) {
+      var n = (dec.charCodeAt(j) - 48) * 256 + carry;
+      out = String(n % 10) + out;
+      carry = Math.floor(n / 10);
+    }
+    while (carry) {
+      out = String(carry % 10) + out;
+      carry = Math.floor(carry / 10);
+    }
+    dec = out.replace(/^0+/, '') || '0';
+  }
+  return dec === '0' ? '' : dec;
+}
+
 function loadToken() {
   state.token = localStorage.getItem('psnOAuthToken') || null;
+  state.accountId = localStorage.getItem('psnRemoteAccountIdDecimal')
+    || accountIdBase64ToDecimal(localStorage.getItem('psnRemoteAccountId'));
   return state.token;
 }
 function saveToken(t) {
@@ -80,10 +249,106 @@ function saveToken(t) {
   localStorage.setItem('psnOAuthToken', t);
 }
 
+function clearTokens() {
+  state.token = null;
+  state.accountId = null;
+  localStorage.removeItem('psnOAuthToken');
+  localStorage.removeItem('psnRefreshToken');
+  localStorage.removeItem('psnTokenExpiresAt');
+  localStorage.removeItem('psnRemoteAccountId');
+  localStorage.removeItem('psnRemoteAccountIdDecimal');
+  localStorage.removeItem('psnAccountId'); // legacy shared key from test builds
+  localStorage.removeItem('psnAccountIdDecimal');
+}
+
 function authHeaders(extra) {
   var h = { 'Authorization': 'Bearer ' + state.token };
   if (extra) for (var k in extra) h[k] = extra[k];
   return h;
+}
+
+function normName(s) {
+  return String(s || '').trim().toLowerCase();
+}
+
+function loadSavedConsoles() {
+  try { return JSON.parse(localStorage.getItem('consoles') || '[]'); }
+  catch (e) { return []; }
+}
+
+function saveConsoleDuid(consoleEntry, duid) {
+  if (!consoleEntry || !duid) return;
+  consoleEntry.duid = duid;
+  var list = loadSavedConsoles();
+  var changed = false;
+  list.forEach(function(c) {
+    var sameId = consoleEntry.id && c.id === consoleEntry.id;
+    var sameHostAccount = c.host === consoleEntry.host
+      && (c.accountB64 || '') === (consoleEntry.accountB64 || '');
+    if (sameId || sameHostAccount) {
+      c.duid = duid;
+      changed = true;
+    }
+  });
+  if (changed)
+    localStorage.setItem('consoles', JSON.stringify(list));
+}
+
+function parsePsnDevices(json, platform) {
+  var clients = json && Array.isArray(json.clients) ? json.clients : [];
+  return clients.map(function(client) {
+    var device = client.device || {};
+    var features = Array.isArray(device.enabledFeatures) ? device.enabledFeatures : [];
+    return {
+      duid: String(client.duid || '').toLowerCase(),
+      name: device.name || client.name || '',
+      platform: platform,
+      remoteplay: features.indexOf('remotePlay') >= 0
+    };
+  }).filter(function(d) { return d.duid && d.remoteplay; });
+}
+
+function fetchDeviceList(platform) {
+  var url = PSN.deviceList + '?' + formEncode({
+    platform: platform,
+    includeFields: 'device',
+    limit: 10,
+    offset: 0
+  });
+  return getJson(url).then(function(json) {
+    return parsePsnDevices(json, platform);
+  });
+}
+
+function chooseDevice(devices, consoleEntry) {
+  if (!devices.length) return null;
+  var wantedDuid = String(consoleEntry.duid || '').toLowerCase();
+  if (wantedDuid) {
+    for (var i = 0; i < devices.length; i++)
+      if (devices[i].duid === wantedDuid) return devices[i];
+  }
+  var names = [
+    consoleEntry.nickname,
+    consoleEntry.label,
+    consoleEntry.discoveredName
+  ].map(normName).filter(Boolean);
+  for (var n = 0; n < names.length; n++) {
+    for (var d = 0; d < devices.length; d++)
+      if (normName(devices[d].name) === names[n]) return devices[d];
+  }
+  return devices.length === 1 ? devices[0] : null;
+}
+
+function ensureConsoleDuid(consoleEntry) {
+  if (consoleEntry.duid) return Promise.resolve(consoleEntry.duid);
+  var platform = consoleEntry.ps5 ? 'PS5' : 'PS4';
+  return fetchDeviceList(platform).then(function(devices) {
+    var device = chooseDevice(devices, consoleEntry);
+    if (!device)
+      throw new Error('could not match this console to a PSN Remote Play device');
+    saveConsoleDuid(consoleEntry, device.duid);
+    return device.duid;
+  });
 }
 
 // --- REST -------------------------------------------------------------------
@@ -144,7 +409,8 @@ function buildConnRequest() {
     return {
       type: c.type || 'STATIC',
       addr: c.ip, mappedAddr: c.ip,
-      port: c.port, mappedPort: c.port
+      port: c.localPort || c.port,
+      mappedPort: c.mappedPort || c.port
     };
   });
   return {
@@ -259,12 +525,14 @@ function resolveWaiter(key, val) { if (waiters[key]) waiters[key](val); }
 // -> punch (ctrl) -> punch (data) -> start.
 function connectRemote(consoleEntry) {
   state.console = consoleEntry;
-  if (!loadToken()) return Promise.reject(new Error('no PSN token — paste one in Settings first'));
   state.localCandidates = [];
   state.remoteCandidates = [];
   var T = window.ChiakiTizen.psnTransport;
 
-  return createSession()
+  return ensureAccessToken()
+    .then(function() { return ensureConsoleDuid(consoleEntry); })
+    .then(function(duid) { state.console.duid = duid; })
+    .then(createSession)
     .then(function() {
       if (!state.wsFqdn) throw new Error('no push-WS FQDN from PSN');
       T.wsOpen(state.token, state.wsFqdn);
@@ -275,7 +543,17 @@ function connectRemote(consoleEntry) {
       return waitFor('psnStun', 8000);
     })
     .then(function(stun) {
-      if (stun && stun.ip)
+      if (stun && Array.isArray(stun.candidates))
+        state.localCandidates = stun.candidates.map(function(c) {
+          return {
+            type: 'STATIC',
+            ip: c.ip,
+            port: c.port,
+            mappedPort: c.port,
+            localPort: c.localPort || c.port
+          };
+        });
+      else if (stun && stun.ip)
         state.localCandidates.push({ type: 'STATIC', ip: stun.ip, port: stun.port });
       return sendOffer(); // REST; the console answers over the push WS
     })
@@ -346,6 +624,11 @@ function atobUtf8(b64) {
 window.ChiakiPSN = {
   saveToken: saveToken,
   loadToken: loadToken,
+  clearTokens: clearTokens,
+  loginUrl: loginUrl,
+  exchangeRedirect: exchangeRedirect,
+  refreshToken: refreshToken,
+  ensureAccessToken: ensureAccessToken,
   connectRemote: connectRemote,
   onNotification: onNotification,
   onTransportEvent: onTransportEvent,

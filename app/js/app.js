@@ -40,6 +40,15 @@ var CODEC_H264 = 0;
 var CODEC_H265 = 1;
 var CODEC_H265_HDR = 2;
 
+function nowMs() {
+  return Date.now();
+}
+
+function reportDiag(kind, detail) {
+  if (window.__ctReport)
+    window.__ctReport(kind, detail);
+}
+
 function samsungTvYearFromModel(text) {
   text = String(text || '').toUpperCase();
   // Common Samsung TV codes: T=2020, A=2021, B=2022, C=2023, D=2024,
@@ -111,6 +120,14 @@ var state = {
   currentIsPs5: false,
   currentIsRemote: false,
   currentVideoProfile: null,
+  bitrateOverlayOpen: false,
+  lastFailureStage: 'none',
+  lastFailureReason: '',
+  compatProbe: null,
+  socketProbe: null,
+  streamMilestones: {},
+  streamIssues: [],
+  streamSummary: null,
   remoteButtons: 0       // buttons held via TV remote during stream
 };
 
@@ -643,6 +660,54 @@ function diagnosticTrail() {
   return window.__ctDiagnostics.join(' | ');
 }
 
+function setFailureStage(stage, reason) {
+  state.lastFailureStage = stage || 'unknown';
+  state.lastFailureReason = reason || '';
+  reportDiag('stage', state.lastFailureStage +
+    (state.lastFailureReason ? (' reason=' + state.lastFailureReason) : ''));
+}
+
+function resetStreamMilestones(label) {
+  state.streamMilestones = {
+    startedAt: nowMs(),
+    label: label || '',
+    connectedAt: 0,
+    firstStatsAt: 0,
+    quitAt: 0
+  };
+  state.streamIssues = [];
+  state.streamSummary = null;
+}
+
+function markStreamMilestone(name) {
+  if (!state.streamMilestones) state.streamMilestones = {};
+  if (!state.streamMilestones[name])
+    state.streamMilestones[name] = nowMs();
+}
+
+function rememberStreamIssue(issue) {
+  state.streamIssues.push(issue || {});
+  if (state.streamIssues.length > 12)
+    state.streamIssues.shift();
+}
+
+function milestoneSummary() {
+  var m = state.streamMilestones || {};
+  var base = m.startedAt || 0;
+  function delta(key) {
+    return base && m[key] ? ((m[key] - base) + 'ms') : 'na';
+  }
+  return [
+    'label=' + (m.label || 'none'),
+    'started=' + (base ? new Date(base).toISOString() : 'na'),
+    'connected=' + delta('connectedAt'),
+    'firstVideo=' + delta('firstVideoAt'),
+    'firstAudio=' + delta('firstAudioAt'),
+    'firstStats=' + delta('firstStatsAt'),
+    'quit=' + delta('quitAt')
+  ].join(' ');
+}
+
 // ---------------------------------------------------------------------------
 // WASM bridge
 // ---------------------------------------------------------------------------
@@ -669,6 +734,7 @@ window.ChiakiTizen = {
       setLoginPin: Module.cwrap('ct_session_set_login_pin', null, ['string']),
       controllerState: Module.cwrap('ct_controller_state', null,
         ['number', 'number', 'number', 'number', 'number', 'number', 'number']),
+      compatProbe: Module.cwrap('ct_compat_probe', 'number', []),
       // PSN over-the-internet transport (see app/js/psn-signaling.js)
       sessionStartRemote: Module.cwrap('ct_session_start_remote', 'number',
         ['number', 'string', 'string', 'number', 'number', 'number',
@@ -747,9 +813,27 @@ window.ChiakiTizen = {
         break;
       case 'rumble': onRumble(ev.left, ev.right); break;
       case 'streamStats':
+        markStreamMilestone('firstStatsAt');
         state.lastStats = { kbps: ev.kbps, fps: ev.fps, width: ev.width,
                             height: ev.height, hdr: ev.hdr };
         if (state.hudOpen) populateHud();
+        if (state.bitrateOverlayOpen) updateBitrateOverlay();
+        break;
+      case 'streamMilestone':
+        if (ev.name === 'firstVideo') markStreamMilestone('firstVideoAt');
+        else if (ev.name === 'firstAudio') markStreamMilestone('firstAudioAt');
+        break;
+      case 'streamIssue':
+        rememberStreamIssue(ev);
+        break;
+      case 'streamSummary':
+        state.streamSummary = ev;
+        break;
+      case 'compatProbe':
+        state.compatProbe = ev;
+        state.socketProbe = ev.socket || null;
+        reportDiag('compat', 'emss=' + !!ev.emss + ' ultraLow=' + !!ev.ultraLow +
+          ' socket=' + (state.socketProbe && state.socketProbe.ok ? 'ok' : 'failed'));
         break;
       // PSN over-the-internet transport events -> the signaling module
       case 'psnWsOpen':
@@ -768,6 +852,7 @@ window.ChiakiTizen = {
   },
 
   _onModuleLoadFailed: function() {
+    setFailureStage('module-load', 'wasm loader script failed');
     setModuleStatus('Chiaki core script failed to load.', true);
     document.getElementById('console-list').innerHTML =
       '<p class="empty-hint">' + escapeHtml(state.moduleStatus) + '</p>';
@@ -775,7 +860,9 @@ window.ChiakiTizen = {
   },
 
   _onModuleStatus: function(text) {
-    setModuleStatus(text, /failed|abort|bad memory|exception|^\[error\]|^\[promise\]/i.test(String(text)));
+    var failed = /failed|abort|bad memory|exception|^\[error\]|^\[promise\]/i.test(String(text));
+    if (failed) setFailureStage('module-runtime', String(text));
+    setModuleStatus(text, failed);
   }
 };
 
@@ -790,7 +877,10 @@ function onCoreReady() {
   if (state.moduleReady) return;
   state.moduleReady = true;
   state.moduleFailed = false;
+  state.lastFailureStage = 'none';
+  state.lastFailureReason = '';
   setModuleStatus('Chiaki core ready', false);
+  if (C && C.compatProbe) C.compatProbe();
   // Discovery is a UDP broadcast; global 255.255.255.255 is often dropped on
   // TVs/APs, so prefer the TV's subnet-directed broadcast (x.y.z.255). Saved
   // consoles are also pinged directly (unicast) so their status works even if
@@ -1416,6 +1506,8 @@ function activateConsole(card) {
 function startRemoteStream(saved) {
   if (!saved || !saved.registKeyB64 || !saved.rpKeyB64) { openRegist(saved && saved.host, saved && saved.ps5); return; }
   var host = saved.host, ps5 = !!saved.ps5;
+  setFailureStage('remote-session-start', '');
+  resetStreamMilestones('remote ' + (ps5 ? 'ps5' : 'ps4'));
   show('stream');
   var video = document.getElementById('stream-video');
   video.muted = false; video.volume = 1.0;
@@ -1439,6 +1531,7 @@ function startRemoteStream(saved) {
     label: saved.label,
     discoveredName: saved.discoveredName
   }).catch(function(e) {
+    setFailureStage('remote-session-error', e && e.message ? e.message : 'failed');
     onStreamQuit({ reason: 'remote: ' + (e && e.message ? e.message : 'failed') });
   });
 }
@@ -2029,6 +2122,11 @@ function storageSummary() {
   ].join(' ');
 }
 
+function compactJson(value) {
+  try { return redactDebugText(JSON.stringify(value || {})); }
+  catch (e) { return 'unavailable'; }
+}
+
 function appendSystemInfo(reportLines, render, done) {
   function complete() {
     if (done && !complete.done) {
@@ -2123,12 +2221,19 @@ function showDebugReport() {
   var lines = [
     'Chiaki for Tizen debug report',
     'generated=' + new Date().toISOString(),
+    'buildInfo=' + compactJson(window.__ctBuildInfo || {}),
     'location=' + redactDebugText(location.href),
     'userAgent=' + redactDebugText(navigator.userAgent || ''),
     'screen=' + screen.width + 'x' + screen.height +
       ' devicePixelRatio=' + (window.devicePixelRatio || 1),
     'moduleReady=' + state.moduleReady + ' moduleFailed=' + state.moduleFailed +
       ' screen=' + state.screen + ' streaming=' + state.streaming,
+    'lastFailure stage=' + state.lastFailureStage +
+      (state.lastFailureReason ? (' reason=' + redactDebugText(state.lastFailureReason)) : ''),
+    'streamMilestones ' + milestoneSummary(),
+    'streamSummary ' + compactJson(state.streamSummary),
+    'streamIssuesTail ' + compactJson(state.streamIssues),
+    'compatProbe ' + compactJson(state.compatProbe),
     'ui performanceMode=' + document.body.classList.contains('perf-ui') +
       ' tvModelYear=' + (state.tvModelYear || 'unknown'),
     'settings resolutionPreset=' + settings.resolution + ' fps=' + settings.fps +
@@ -2226,6 +2331,8 @@ function startStream(saved) {
     return;
   }
   var host = saved.host, ps5 = !!saved.ps5;
+  setFailureStage('local-session-start', '');
+  resetStreamMilestones('local ' + (ps5 ? 'ps5' : 'ps4'));
   show('stream');
   var video = document.getElementById('stream-video');
   video.muted = false;
@@ -2277,10 +2384,15 @@ function stopStream() {
 }
 
 function onStreamConnected() {
+  markStreamMilestone('connectedAt');
+  state.lastFailureStage = 'none';
+  state.lastFailureReason = '';
   document.getElementById('stream-overlay').classList.add('hidden');
 }
 
 function onStreamQuit(ev) {
+  markStreamMilestone('quitAt');
+  setFailureStage('stream-quit', ev.reason || 'unknown');
   state.streaming = false;
   state.currentHost = null;
   state.currentIsPs5 = false;
@@ -2318,6 +2430,45 @@ function codecLabel(codec) {
   return 'H.264';
 }
 
+function bitrateText(kbps) {
+  if (typeof kbps !== 'number' || !isFinite(kbps)) return '';
+  return kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbps' : kbps + ' kbps';
+}
+
+function targetBitrateText() {
+  var targetBitrate = state.currentVideoProfile && state.currentVideoProfile.bitrate;
+  return targetBitrate ? ((targetBitrate / 1000) + ' Mbps target') : 'Auto';
+}
+
+function updateBitrateOverlay() {
+  var value = document.getElementById('bitrate-overlay-value');
+  var meta = document.getElementById('bitrate-overlay-meta');
+  if (!value || !meta) return;
+  var st = state.lastStats;
+  if (st && typeof st.kbps === 'number') {
+    value.textContent = bitrateText(st.kbps);
+    meta.textContent = ((st.width && st.height) ? (st.width + '×' + st.height + ' · ') : '') +
+      (st.fps ? (st.fps + ' fps') : 'streaming');
+  } else {
+    value.textContent = targetBitrateText();
+    meta.textContent = 'waiting for stream stats';
+  }
+}
+
+function toggleBitrateOverlay() {
+  state.bitrateOverlayOpen = !state.bitrateOverlayOpen;
+  var el = document.getElementById('bitrate-overlay');
+  if (!el) return;
+  updateBitrateOverlay();
+  el.classList.toggle('hidden', !state.bitrateOverlayOpen);
+}
+
+function closeBitrateOverlay() {
+  state.bitrateOverlayOpen = false;
+  var el = document.getElementById('bitrate-overlay');
+  if (el) el.classList.add('hidden');
+}
+
 function openHud() {
   state.hudOpen = true;
   document.getElementById('stream-hud').classList.remove('hidden');
@@ -2332,6 +2483,7 @@ function closeHud() {
 function resetHud() {
   state.lastStats = null;
   closeHud();
+  closeBitrateOverlay();
 }
 function hudNavEls() {
   return Array.prototype.slice.call(
@@ -2372,12 +2524,9 @@ function populateHud() {
     ((st && st.fps) ? st.fps : s.fps) + ' fps';
   var brEl = document.getElementById('hud-bitrate');
   if (st && typeof st.kbps === 'number')
-    brEl.textContent = st.kbps >= 1000 ? (st.kbps / 1000).toFixed(1) + ' Mbps'
-                                       : st.kbps + ' kbps';
-  else {
-    var targetBitrate = state.currentVideoProfile && state.currentVideoProfile.bitrate;
-    brEl.textContent = targetBitrate ? ((targetBitrate / 1000) + ' Mbps target') : 'Auto';
-  }
+    brEl.textContent = bitrateText(st.kbps);
+  else
+    brEl.textContent = targetBitrateText();
   var requestedCodec = state.currentVideoProfile ? state.currentVideoProfile.codec
     : codecValue(s.codec, true);
   document.getElementById('hud-codec').textContent = codecLabel(requestedCodec);
@@ -2542,7 +2691,12 @@ document.addEventListener('keydown', function(e) {
       openHud();
       return;
     }
-    if (code === KEY.RED || code === KEY.GREEN) {
+    if (code === KEY.GREEN) {
+      e.preventDefault();
+      toggleBitrateOverlay();
+      return;
+    }
+    if (code === KEY.RED) {
       e.preventDefault();
       return;
     }

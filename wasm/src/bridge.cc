@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <atomic>
 #include <string>
 #include <memory>
@@ -31,6 +32,7 @@
 #include <chrono>
 
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -206,6 +208,12 @@ struct BridgeState
 	bool stream_hdr = false;
 	uint64_t stat_bytes = 0, stat_frames = 0;
 	std::chrono::steady_clock::time_point stat_t0;
+	bool first_video_reported = false;
+	bool first_audio_reported = false;
+	std::atomic<uint64_t> video_samples{0};
+	std::atomic<uint64_t> audio_frames{0};
+	std::atomic<uint64_t> video_append_failures{0};
+	std::atomic<uint64_t> frames_lost_total{0};
 };
 
 BridgeState *g_state = nullptr;
@@ -284,6 +292,17 @@ bool VideoSampleCb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool fram
 	if(!state->player)
 		return true;
 
+	state->video_samples++;
+	if(!state->first_video_reported)
+	{
+		state->first_video_reported = true;
+		char fields[128];
+		std::snprintf(fields, sizeof(fields),
+			"\"name\":\"firstVideo\",\"bytes\":%zu,\"lost\":%d,\"recovered\":%s",
+			buf_size, frames_lost, frame_recovered ? "true" : "false");
+		EmitEvent("streamMilestone", fields);
+	}
+
 	// Live stats for the HUD: accumulate bytes/frames, emit ~1×/sec.
 	state->stat_bytes += buf_size;
 	state->stat_frames++;
@@ -308,10 +327,22 @@ bool VideoSampleCb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool fram
 	// IDR frame from the console — exactly what we want both before the
 	// first key frame and after an append failure.
 	bool ok = state->player->PushVideoAccessUnit(buf, buf_size, frames_lost);
+	if(!ok)
+		state->video_append_failures++;
+	if(frames_lost > 0)
+		state->frames_lost_total += static_cast<uint64_t>(frames_lost);
 	if(!ok || frames_lost || frame_recovered)
+	{
 		std::fprintf(stderr,
 			"[ct_av] video sample issue size=%zu ok=%d lost=%d recovered=%d\n",
 			buf_size, ok ? 1 : 0, frames_lost, frame_recovered ? 1 : 0);
+		char fields[160];
+		std::snprintf(fields, sizeof(fields),
+			"\"kind\":\"video\",\"ok\":%s,\"bytes\":%zu,\"lost\":%d,\"recovered\":%s",
+			ok ? "true" : "false", buf_size, frames_lost,
+			frame_recovered ? "true" : "false");
+		EmitEvent("streamIssue", fields);
+	}
 	return ok;
 }
 
@@ -337,6 +368,16 @@ void OpusSettingsCb(uint32_t channels, uint32_t rate, void *user)
 	unsigned channels = state->opus_decoder.audio_header.channels;
 	if(channels == 0)
 		channels = 2;
+	state->audio_frames++;
+	if(!state->first_audio_reported)
+	{
+		state->first_audio_reported = true;
+		char fields[128];
+		std::snprintf(fields, sizeof(fields),
+			"\"name\":\"firstAudio\",\"samples\":%zu,\"channels\":%u",
+			samples_count, channels);
+		EmitEvent("streamMilestone", fields);
+	}
 	// opus_decode() returns samples per channel; the PCM buffer itself is
 	// interleaved, and EmssPlayer expects this per-channel sample count.
 		state->player->PushAudioPcm(buf, samples_count);
@@ -365,7 +406,7 @@ void OpusSettingsCb(uint32_t channels, uint32_t rate, void *user)
 
 	void SessionEventCb(ChiakiEvent *event, void *user)
 	{
-	(void)user;
+	auto *state = static_cast<BridgeState *>(user);
 	switch(event->type)
 	{
 		case CHIAKI_EVENT_CONNECTED:
@@ -388,6 +429,18 @@ void OpusSettingsCb(uint32_t channels, uint32_t rate, void *user)
 		}
 			case CHIAKI_EVENT_QUIT:
 		{
+			if(state)
+			{
+				char summary[224];
+				std::snprintf(summary, sizeof(summary),
+					"\"videoSamples\":%llu,\"audioFrames\":%llu,"
+					"\"videoAppendFailures\":%llu,\"framesLostTotal\":%llu",
+					static_cast<unsigned long long>(state->video_samples.load()),
+					static_cast<unsigned long long>(state->audio_frames.load()),
+					static_cast<unsigned long long>(state->video_append_failures.load()),
+					static_cast<unsigned long long>(state->frames_lost_total.load()));
+				EmitEvent("streamSummary", summary);
+			}
 			std::string fields = "\"reason\":\"";
 			fields += JsonEscape(chiaki_quit_reason_string(event->quit.reason));
 			fields += "\",\"isError\":";
@@ -450,6 +503,141 @@ void DiscoveryCb(ChiakiDiscoveryHost *hosts, size_t hosts_count, void *user)
 	}
 	json += "]}";
 	EmitJson(json);
+}
+
+std::string SocketProbeJson()
+{
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if(fd < 0)
+	{
+		int e = errno;
+		char buf[160];
+		std::snprintf(buf, sizeof(buf),
+			"\"ok\":false,\"stage\":\"socket\",\"fd\":-1,\"errno\":%d", e);
+		return std::string("{") + buf + "}";
+	}
+
+	int rcvbuf = 256 * 1024;
+	int set_rcvbuf = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+	int set_rcvbuf_errno = set_rcvbuf == 0 ? 0 : errno;
+	int effective_rcvbuf = 0;
+	socklen_t effective_rcvbuf_len = sizeof(effective_rcvbuf);
+	if(getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &effective_rcvbuf, &effective_rcvbuf_len) != 0)
+		effective_rcvbuf = -1;
+
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = 0;
+	if(bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
+	{
+		int e = errno;
+		close(fd);
+		char buf[256];
+		std::snprintf(buf, sizeof(buf),
+			"\"ok\":false,\"stage\":\"bind\",\"fd\":%d,\"errno\":%d,"
+			"\"setRcvbuf\":%d,\"setRcvbufErrno\":%d,\"effectiveRcvbuf\":%d",
+			fd, e, set_rcvbuf, set_rcvbuf_errno, effective_rcvbuf);
+		return std::string("{") + buf + "}";
+	}
+
+	sockaddr_in bound{};
+	socklen_t bound_len = sizeof(bound);
+	if(getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &bound_len) != 0)
+	{
+		int e = errno;
+		close(fd);
+		char buf[256];
+		std::snprintf(buf, sizeof(buf),
+			"\"ok\":false,\"stage\":\"getsockname\",\"fd\":%d,\"errno\":%d,"
+			"\"setRcvbuf\":%d,\"setRcvbufErrno\":%d,\"effectiveRcvbuf\":%d",
+			fd, e, set_rcvbuf, set_rcvbuf_errno, effective_rcvbuf);
+		return std::string("{") + buf + "}";
+	}
+
+	const uint8_t ping = 0x42;
+	ssize_t sent = sendto(fd, &ping, sizeof(ping), 0,
+		reinterpret_cast<sockaddr *>(&bound), sizeof(bound));
+	int send_errno = sent == static_cast<ssize_t>(sizeof(ping)) ? 0 : errno;
+
+	uint8_t got = 0;
+	ssize_t recvd = -1;
+	int recv_errno = 0;
+	for(int i = 0; i < 20; i++)
+	{
+		fd_set readable;
+		FD_ZERO(&readable);
+		FD_SET(fd, &readable);
+		timeval timeout{0, 5000};
+		int ready = select(fd + 1, &readable, nullptr, nullptr, &timeout);
+		if(ready == 0) continue;
+		if(ready < 0) { recv_errno = errno; break; }
+		recvd = recvfrom(fd, &got, sizeof(got), 0, nullptr, nullptr);
+		if(recvd > 0)
+		{
+			recv_errno = 0;
+			break;
+		}
+		recv_errno = errno;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	close(fd);
+
+	bool ok = sent == static_cast<ssize_t>(sizeof(ping)) && recvd == 1 && got == ping;
+	char buf[384];
+	std::snprintf(buf, sizeof(buf),
+		"\"ok\":%s,\"stage\":\"%s\",\"fd\":%d,\"port\":%u,"
+		"\"setRcvbuf\":%d,\"setRcvbufErrno\":%d,\"effectiveRcvbuf\":%d,"
+		"\"sent\":%zd,\"sendErrno\":%d,\"received\":%zd,\"recvErrno\":%d",
+		ok ? "true" : "false", ok ? "ok" : "send-recv", fd,
+		static_cast<unsigned>(ntohs(bound.sin_port)),
+		set_rcvbuf, set_rcvbuf_errno, effective_rcvbuf,
+		sent, send_errno, recvd, recv_errno);
+	return std::string("{") + buf + "}";
+}
+
+void CompatProbeImpl()
+{
+	auto ver = samsung::wasm::EmssVersionInfo::Create();
+	samsung::html::HTMLMediaElement media_element("stream-video");
+	samsung::wasm::ElementaryMediaStreamSource source(
+		samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kUltraLow,
+		samsung::wasm::ElementaryMediaStreamSource::RenderingMode::kMediaElement);
+	samsung::wasm::ElementaryAudioTrackConfig audio_track_config{
+		"audio/webm; codecs=\"pcm\"",
+		{},
+		samsung::wasm::SampleFormat::kS16,
+		samsung::wasm::ChannelLayout::kStereo,
+		48000,
+	};
+	auto audio_validation = samsung::wasm::ElementaryMediaTrack::ValidateAudioConfig(audio_track_config);
+	std::string fields;
+	fields.reserve(640);
+	fields += "\"emss\":";
+	fields += ver.has_emss ? "true" : "false";
+	fields += ",\"legacyEmss\":";
+	fields += ver.has_legacy_emss ? "true" : "false";
+	fields += ",\"ultraLow\":";
+	fields += ver.has_ultra_low_latency ? "true" : "false";
+	fields += ",\"lowLatencyVideoTexture\":";
+	fields += ver.has_low_latency_video_texture ? "true" : "false";
+	fields += ",\"decodingMode\":";
+	fields += ver.has_decoding_mode ? "true" : "false";
+	fields += ",\"configValidation\":";
+	fields += ver.has_config_validation ? "true" : "false";
+	fields += ",\"mediaElementValid\":";
+	fields += media_element.IsValid() ? "true" : "false";
+	fields += ",\"sourceValid\":";
+	fields += source.IsValid() ? "true" : "false";
+	char audio_buf[96];
+	std::snprintf(audio_buf, sizeof(audio_buf),
+		",\"audioValidationOk\":%s,\"audioValidationOp\":%d",
+		audio_validation ? "true" : "false",
+		static_cast<int>(audio_validation.operation_result));
+	fields += audio_buf;
+	fields += ",\"socket\":";
+	fields += SocketProbeJson();
+	EmitEvent("compatProbe", fields);
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +713,14 @@ CT_EXPORT int ct_init()
 	CT_CHECKPOINT("EmitEvent ready begin");
 	EmitEvent("ready");
 	CT_CHECKPOINT("EmitEvent ready done");
+	return 0;
+}
+
+CT_EXPORT int ct_compat_probe()
+{
+	DispatchToWorker([]() {
+		CompatProbeImpl();
+	});
 	return 0;
 }
 
@@ -829,6 +1025,12 @@ namespace
 	g_state->stat_bytes = 0;
 	g_state->stat_frames = 0;
 	g_state->stat_t0 = std::chrono::steady_clock::now();
+	g_state->first_video_reported = false;
+	g_state->first_audio_reported = false;
+	g_state->video_samples = 0;
+	g_state->audio_frames = 0;
+	g_state->video_append_failures = 0;
+	g_state->frames_lost_total = 0;
 
 	g_state->player.reset(new chiaki_tizen::EmssPlayer("stream-video"));
 	if(!g_state->player->Start(video_cfg, chiaki_tizen::AudioConfig{}))

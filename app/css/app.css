@@ -684,6 +684,27 @@ h2 { font-size: 52px; font-weight: 300; margin-bottom: 16px; letter-spacing: 0.0
 .stream-overlay.error #stream-status { color: var(--glyph-pink); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.bitrate-overlay {
+  position: absolute; top: 34px; right: 38px; z-index: 3;
+  min-width: 210px; padding: 14px 18px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+  background: rgba(5, 8, 13, 0.72);
+  border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 8px;
+  color: var(--text);
+  box-shadow: 0 12px 34px rgba(0,0,0,0.42);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.bitrate-overlay.hidden { display: none; }
+#bitrate-overlay-value {
+  font-size: 26px; line-height: 1.15; font-variant-numeric: tabular-nums;
+}
+#bitrate-overlay-meta {
+  font-size: 17px; line-height: 1.15; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .dialog {
   position: absolute; left: 50%; top: 50%; z-index: 3; transform: translate(-50%, -50%);
   background: linear-gradient(180deg, var(--panel-hi), var(--panel));

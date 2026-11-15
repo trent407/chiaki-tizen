@@ -6,6 +6,7 @@
 
 # Generated app bundles and build output
 /app/wasm_modules/
+/app/build-info.js
 /dist/
 /wasm/build/
 

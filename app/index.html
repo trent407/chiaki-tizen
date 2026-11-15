@@ -82,6 +82,7 @@
     var lines = [
       'Chiaki for Tizen debug report',
       'generated=' + new Date().toISOString(),
+      'buildInfo=' + window.__ctRedactDebugText(JSON.stringify(window.__ctBuildInfo || {})),
       'location=' + window.__ctRedactDebugText(location.href),
       'userAgent=' + window.__ctRedactDebugText(navigator.userAgent || ''),
       'screen=' + screen.width + 'x' + screen.height +
@@ -412,6 +413,10 @@
     <div class="spinner" aria-hidden="true"></div>
     <p id="stream-status">Connecting&hellip;</p>
   </div>
+  <div id="bitrate-overlay" class="bitrate-overlay hidden" aria-label="Bitrate overlay">
+    <span id="bitrate-overlay-value">Bitrate: waiting</span>
+    <span id="bitrate-overlay-meta">--</span>
+  </div>
   <div id="login-pin-dialog" class="dialog hidden">
     <h3>Console login PIN</h3>
     <input id="login-pin" class="tv-input" data-nav inputmode="numeric" maxlength="4">
@@ -441,6 +446,8 @@
 
 <!-- WASM module (Samsung Emscripten output), placed here by build.sh -->
 <script>
+  window.__ctBootStartedAt = window.__ctSplashShownAt || Date.now();
+  window.__ctBuildInfo = window.__ctBuildInfo || { version: 'dev', commit: 'unknown', builtAt: 'unknown' };
   window.__ctModuleStatusQueue = [];
   window.__ctDiagnostics = [];
   // TEMPORARY: records a line into the persistent on-screen log exactly
@@ -451,7 +458,9 @@
   // ever shown once, in a 12-second-timeout snapshot that a fast crash
   // could pre-empt entirely. Remove once diagnosed.
   function __ctRecord(text) {
-    window.__ctDiagnostics.push(text);
+    var elapsed = Date.now() - (window.__ctBootStartedAt || Date.now());
+    var line = '+' + elapsed + 'ms ' + text;
+    window.__ctDiagnostics.push(line);
     // Was capped at 16, which a single pthread pool warm-up
     // (PTHREAD_POOL_SIZE=16, each worker posting 2-3 messages) could exceed
     // on its own, silently evicting every checkpoint from later in boot
@@ -459,7 +468,7 @@
     if (window.__ctDiagnostics.length > 500)
       window.__ctDiagnostics.shift();
     if (window.console && console.log)
-      console.log(text);
+      console.log(line);
     var logEl = document.getElementById('ct-debug-log');
     if (logEl) {
       // Only stick to the bottom if already there — otherwise this fights
@@ -579,6 +588,9 @@
 <script src="js/tizen-socket-host-shim.js"
   onload="window.__ctReport && window.__ctReport('loader', 'socket shim loaded')"
   onerror="window.__ctReport && window.__ctReport('loader', 'socket shim failed to load')"></script>
+<script src="build-info.js"
+  onload="window.__ctReport && window.__ctReport('loader', 'build info loaded')"
+  onerror="window.__ctReport && window.__ctReport('loader', 'build info missing')"></script>
 <script src="js/app.js"
   onload="window.__ctReport && window.__ctReport('loader', 'app ui loaded')"
   onerror="window.__ctReport && window.__ctReport('loader', 'app ui failed to load')"></script>

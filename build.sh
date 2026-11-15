@@ -58,6 +58,36 @@ build_wasm() {
 
 assemble_app() {
 	mkdir -p "$APP_DIR/wasm_modules"
+	local widget_version git_commit git_branch git_dirty built_at
+	widget_version="$(python3 - "$APP_DIR/config.xml" <<'EOF'
+import sys
+import xml.etree.ElementTree as ET
+print(ET.parse(sys.argv[1]).getroot().get("version", "unknown"))
+EOF
+)"
+	git_commit="$(git -C "$HERE" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+	git_branch="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+	if git -C "$HERE" diff --quiet --ignore-submodules -- 2>/dev/null; then
+		git_dirty="false"
+	else
+		git_dirty="true"
+	fi
+	built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+	python3 - "$APP_DIR/build-info.js" "$widget_version" "$git_commit" "$git_branch" "$git_dirty" "$built_at" <<'EOF'
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+info = {
+    "version": sys.argv[2],
+    "commit": sys.argv[3],
+    "branch": sys.argv[4],
+    "dirty": sys.argv[5] == "true",
+    "builtAt": sys.argv[6],
+}
+path.write_text("window.__ctBuildInfo = " + json.dumps(info, sort_keys=True) + ";\n")
+EOF
 	{
 		cat "$APP_DIR/js/tizen-socket-host-shim.js"
 		printf '\n'

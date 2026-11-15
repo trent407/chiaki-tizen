@@ -8,9 +8,11 @@ Status: **working local-network Remote Play on Samsung TV hardware** — video
 (H.264, 720p/1080p at 30/60), audio, the on-screen console list / pairing /
 quality settings and a toggleable debug overlay are all functional. The whole
 WASM module also compiles and links against real chiaki-ng via the native check
-(`wasm/native-check.sh`). Remote Play over the *internet* is not yet implemented
-(local network only — see "Known gaps"). Experimental HDR for PS5 (HEVC Main10)
-is available as an opt-in Settings toggle.
+(`wasm/native-check.sh`). Local-network Remote Play is the supported path.
+Remote Play over the *internet* is wired as an experimental PSN signaling /
+hole-punch path, but still needs real on-device bring-up before it should be
+treated as reliable. Experimental HDR for PS5 (HEVC Main10) is available as an
+opt-in Settings toggle.
 
 ## Downloads
 
@@ -50,7 +52,10 @@ the WASM Player in ultra-low latency mode, audio decoded to PCM in software.
   - `src/bridge.cc` — chiaki session/discovery/registration glue, `ct_*` C ABI
   - `src/emss_player.{hh,cc}` — Samsung WASM Player pipeline (video + audio)
   - `src/tizen_compat.h` — socket compat shim (no fcntl, WASI errno, SOCK_NONBLOCK)
-  - `src/holepunch_stub.c` — stubs for PSN-over-internet code paths (local play only)
+  - `src/holepunch_bridge.c` — adapter that hands punched remote-play sockets
+    to chiaki's holepunch session API
+  - `src/net/` — experimental PSN transport pieces promoted from spikes:
+    authenticated push WebSocket, STUN, and UDP candidate checks
   - `gen/` — pre-generated `takion.pb.{c,h}` (nanopb) and `chiaki/config.h`,
     so the WASM build needs no protoc
   - `native-check/` — mock Samsung SDK headers for compiling/linking the whole
@@ -82,8 +87,8 @@ external signing/install tooling.
 
 ### Native validation (no Samsung SDK needed)
 
-The entire module — bridge, player, stubs — compiles and links against real
-chiaki-ng on a Linux box using the mock headers:
+The entire module — bridge, player, transport, and chiaki glue — compiles and
+links against real chiaki-ng on a Linux box using the mock headers:
 
 ```
 cd wasm && ./native-check.sh /path/to/chiaki-ng
@@ -95,11 +100,15 @@ This is how every chiaki API call in this port was verified.
 
 1. Console and TV on the same network; Remote Play enabled on the console.
 2. Get your PSN Account ID in base64 (e.g. via chiaki-ng's `psn-account-id`
-   script) — enter it once, it is remembered.
+   script, or by using the PSN Login helper in Settings) — enter it once, it is
+   remembered.
 3. Pair: console Settings › System › Remote Play › Link Device → enter the
    8-digit code in the app.
 4. Connect a controller — see "Controller setup" below. The TV remote works
    for menus (color keys map to △○✕□).
+
+During streaming, press the **Green** remote key to toggle a compact live
+bitrate, resolution, and frame-rate overlay.
 
 ### Debug reports and saved data
 
@@ -142,11 +151,13 @@ Home is a reserved system key). If you use this path, just avoid the PS button.
 
 ## Known gaps / next steps
 
-- **PSN remote connection (holepunch) is stubbed** — local network only.
-  The real implementation needs PSN signaling plus NAT traversal; the RUDP
-  transport is separable and cheap to un-stub, only `holepunch.c` needs the
-  heavy libraries. Full scoped plan in
-  `docs/remote-play-over-internet-plan.md`.
+- **PSN remote connection is experimental** — the major pieces are wired:
+  OAuth/token storage, device lookup, PSN REST signaling, authenticated push
+  WebSocket, STUN, UDP candidate checks, the holepunch adapter, and
+  `ct_session_start_remote(...)`. The remaining work is on-device bring-up:
+  validating Sony's current response shapes, Tizen DNS/TLS/socket behavior,
+  source-port preservation, and a real PS5/PS4 handshake across networks. See
+  `docs/remote-play-integration-status.md` for the current ledger.
 - HDR for PS5 (HEVC Main10) is an **experimental opt-in** toggle in Settings
   (`VideoConfig.hdr` → `CHIAKI_CODEC_H265_HDR`). Off by default, which leaves
   the known-good H.264 path untouched; on that path auto-downgrade is disabled

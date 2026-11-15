@@ -110,6 +110,11 @@ This is how every chiaki API call in this port was verified.
 During streaming, press the **Green** remote key to toggle a compact live
 bitrate, resolution, and frame-rate overlay.
 
+Settings → **Playback mode** lets you choose **Tizen 8 — Ultra Low latency**
+(the default, also for older TVs) or **Tizen 9 — Low latency compatibility**
+for TVs with frozen or black video. This selects a playback path, not an OS
+version. The choice is saved and applies to the next local or remote connection.
+
 ### Debug reports and saved data
 
 - Press the **Blue** remote key to open the on-screen debug log. If the app is

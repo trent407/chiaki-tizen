@@ -322,6 +322,16 @@
             <div id="setting-bitrate-remote-menu" class="tv-select-menu hidden"></div>
           </div>
         </label>
+        <label>Playback mode
+          <div class="tv-select-wrap">
+            <select id="setting-playback-mode" class="native-select-source" tabindex="-1" aria-hidden="true">
+              <option value="tizen8">Tizen 8 — Ultra Low latency</option>
+              <option value="tizen9">Tizen 9 — Low latency compatibility</option>
+            </select>
+            <button id="setting-playback-mode-button" type="button" class="tv-input tv-select" data-nav data-select-for="setting-playback-mode"></button>
+            <div id="setting-playback-mode-menu" class="tv-select-menu hidden"></div>
+          </div>
+        </label>
         <label>Codec
           <div class="tv-select-wrap">
             <select id="setting-codec" class="native-select-source" tabindex="-1" aria-hidden="true">
@@ -334,6 +344,7 @@
           </div>
         </label>
       </div>
+      <p class="field-hint">Try Tizen 9 if video freezes or stays black. Tizen 8 uses Ultra Low latency and also supports older TVs. Changes apply on the next connection.</p>
       <label class="legacy-hdr-row hidden">HDR (legacy)
         <div class="tv-select-wrap">
           <select id="setting-hdr" class="native-select-source" tabindex="-1" aria-hidden="true">

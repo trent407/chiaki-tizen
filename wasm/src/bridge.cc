@@ -217,6 +217,8 @@ struct BridgeState
 };
 
 BridgeState *g_state = nullptr;
+// UI preference only; no platform calls on the browser thread.
+std::atomic<bool> g_ultra_low_latency{true};
 
 // TEMPORARY: the pthread worker main()/ct_init() run on — every ct_* entry
 // point that can touch a socket needs to actually execute here, not
@@ -601,7 +603,7 @@ void CompatProbeImpl()
 	auto ver = samsung::wasm::EmssVersionInfo::Create();
 	samsung::html::HTMLMediaElement media_element("stream-video");
 	samsung::wasm::ElementaryMediaStreamSource source(
-		samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kUltraLow,
+		samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kLow,
 		samsung::wasm::ElementaryMediaStreamSource::RenderingMode::kMediaElement);
 	samsung::wasm::ElementaryAudioTrackConfig audio_track_config{
 		"audio/webm; codecs=\"pcm\"",
@@ -714,6 +716,11 @@ CT_EXPORT int ct_init()
 	EmitEvent("ready");
 	CT_CHECKPOINT("EmitEvent ready done");
 	return 0;
+}
+
+CT_EXPORT void ct_set_playback_mode(int compatibility_mode)
+{
+	g_ultra_low_latency.store(compatibility_mode == 0);
 }
 
 CT_EXPORT int ct_compat_probe()
@@ -1032,7 +1039,7 @@ namespace
 	g_state->video_append_failures = 0;
 	g_state->frames_lost_total = 0;
 
-	g_state->player.reset(new chiaki_tizen::EmssPlayer("stream-video"));
+	g_state->player.reset(new chiaki_tizen::EmssPlayer("stream-video", g_ultra_low_latency.load()));
 	if(!g_state->player->Start(video_cfg, chiaki_tizen::AudioConfig{}))
 	{
 		g_state->player.reset();

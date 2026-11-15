@@ -225,6 +225,7 @@ function applyPrefill() {
           bitrateRemote: cfg.settings.bitrateRemote != null ? cfg.settings.bitrateRemote :
             (cfg.settings.bitrateRemotePS5 != null ? cfg.settings.bitrateRemotePS5 :
               (cfg.settings.bitrateRemotePS4 != null ? cfg.settings.bitrateRemotePS4 : s.bitrateRemote)),
+          playbackMode: cfg.settings.playbackMode || s.playbackMode,
           codec: cfg.settings.codec ||
             cfg.settings.codecLocalPS5 ||
             cfg.settings.codecRemotePS5 ||
@@ -284,7 +285,8 @@ function loadStreamSettings() {
     hdr: hdr,
     bitrateLocal: localBitrate,
     bitrateRemote: remoteBitrate,
-    codec: codec
+    codec: codec,
+    playbackMode: localStorage.getItem('streamPlaybackMode') === 'tizen9' ? 'tizen9' : 'tizen8'
   };
 }
 function saveStreamSettings(settings) {
@@ -294,6 +296,7 @@ function saveStreamSettings(settings) {
   localStorage.setItem('streamHdr', codec === 'h265_hdr' ? '1' : '0');
   localStorage.setItem('streamBitrateLocal', String(settings.bitrateLocal || 0));
   localStorage.setItem('streamBitrateRemote', String(settings.bitrateRemote || 0));
+  localStorage.setItem('streamPlaybackMode', settings.playbackMode === 'tizen9' ? 'tizen9' : 'tizen8');
   localStorage.setItem('streamCodec', codec);
   localStorage.setItem('streamCodecPS4', 'h264');
   localStorage.setItem('streamCodecLocalPS5', codec);
@@ -734,6 +737,7 @@ window.ChiakiTizen = {
       setLoginPin: Module.cwrap('ct_session_set_login_pin', null, ['string']),
       controllerState: Module.cwrap('ct_controller_state', null,
         ['number', 'number', 'number', 'number', 'number', 'number', 'number']),
+      setPlaybackMode: Module.cwrap('ct_set_playback_mode', null, ['number']),
       compatProbe: Module.cwrap('ct_compat_probe', 'number', []),
       // PSN over-the-internet transport (see app/js/psn-signaling.js)
       sessionStartRemote: Module.cwrap('ct_session_start_remote', 'number',
@@ -759,6 +763,7 @@ window.ChiakiTizen = {
     };
     window.ChiakiTizen.sessionStartRemote = function(ps5, registKeyB64, rpKeyB64,
       res, fps, hdr, bitrate, codec, ctrlFd, dataFd, psIp, psCtrlPort) {
+      C.setPlaybackMode(loadStreamSettings().playbackMode === 'tizen9' ? 1 : 0);
       return C.sessionStartRemote(ps5, registKeyB64, rpKeyB64, res, fps, hdr, bitrate, codec,
         ctrlFd, dataFd, psIp, psCtrlPort);
     };
@@ -1942,6 +1947,7 @@ function openSettings() {
   document.getElementById('setting-bitrate-local').value = String(settings.bitrateLocal);
   document.getElementById('setting-bitrate-remote').value = String(settings.bitrateRemote);
   document.getElementById('setting-codec').value = settings.codec;
+  document.getElementById('setting-playback-mode').value = settings.playbackMode;
   syncAllTvSelects();
   var authRow = document.getElementById('setting-psn-auth-row');
   if (authRow) authRow.classList.toggle('hidden', !PSN_AUTH_ENABLED || !window.ChiakiPSN);
@@ -2052,6 +2058,7 @@ function saveSettings() {
     fps: parseInt(document.getElementById('setting-fps').value, 10),
     bitrateLocal: parseInt(document.getElementById('setting-bitrate-local').value, 10) || 0,
     bitrateRemote: parseInt(document.getElementById('setting-bitrate-remote').value, 10) || 0,
+    playbackMode: document.getElementById('setting-playback-mode').value,
     codec: document.getElementById('setting-codec').value
   };
   saveStreamSettings(settings);
@@ -2239,7 +2246,7 @@ function showDebugReport() {
     'settings resolutionPreset=' + settings.resolution + ' fps=' + settings.fps +
       ' bitrateLocal=' + settings.bitrateLocal +
       ' bitrateRemote=' + settings.bitrateRemote +
-      ' codec=' + settings.codec,
+      ' codec=' + settings.codec + ' playbackMode=' + settings.playbackMode,
     'storage ' + storageSummary(),
     'persistentBackup status=' + backup.status +
       ' restored=' + !!backup.restored +
@@ -2308,6 +2315,7 @@ function resetSavedData() {
   document.getElementById('setting-bitrate-local').value = '0';
   document.getElementById('setting-bitrate-remote').value = '0';
   document.getElementById('setting-codec').value = 'h265';
+  document.getElementById('setting-playback-mode').value = 'tizen8';
   populatePsnProfileSelect();
   syncAllTvSelects();
   document.getElementById('setting-psn-token').value = '';
@@ -2355,6 +2363,7 @@ function startStream(saved) {
   var videoProfile = streamVideoProfileFor(ps5, false);
   state.currentVideoProfile = videoProfile;
   var hdr = (ps5 && videoProfile.codec === CODEC_H265_HDR) ? 1 : 0;
+  C.setPlaybackMode(streamSettings.playbackMode === 'tizen9' ? 1 : 0);
   try {
     C.sessionStart(host, ps5 ? 1 : 0, saved.registKeyB64, saved.rpKeyB64,
       streamSettings.resolution, streamSettings.fps, hdr,

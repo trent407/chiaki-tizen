@@ -51,7 +51,7 @@ class EmssPlayer final
 {
 public:
 	// media_element_id: DOM id of the <video> element in the host page.
-	explicit EmssPlayer(const char *media_element_id);
+	explicit EmssPlayer(const char *media_element_id, bool ultra_low_latency = true);
 	~EmssPlayer() override;
 
 	EmssPlayer(const EmssPlayer &) = delete;

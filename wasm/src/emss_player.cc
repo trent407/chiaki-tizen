@@ -100,11 +100,14 @@ bool AccessUnitHasCodecHeader(const uint8_t *buf, size_t size, bool h265)
 
 } // namespace
 
-EmssPlayer::EmssPlayer(const char *media_element_id)
+EmssPlayer::EmssPlayer(const char *media_element_id, bool ultra_low_latency)
 	: media_element_(media_element_id),
-	  source_(ElementaryMediaStreamSource::LatencyMode::kUltraLow,
+	  source_(ultra_low_latency ? ElementaryMediaStreamSource::LatencyMode::kUltraLow
+	                            : ElementaryMediaStreamSource::LatencyMode::kLow,
 	          ElementaryMediaStreamSource::RenderingMode::kMediaElement)
 {
+	std::fprintf(stderr, "[emss] playback mode: %s\n",
+		ultra_low_latency ? "Tizen 8 (Ultra Low)" : "Tizen 9 (Low compatibility)");
 	source_.SetListener(this);
 	media_element_.SetListener(this);
 }
@@ -138,10 +141,7 @@ bool EmssPlayer::Start(const VideoConfig &video, const AudioConfig &audio)
 		running_ = true;
 	}
 
-	// TEMPORARY: one-shot platform capability + object validity dump. If
-	// has_ultra_low_latency is 0, the kUltraLow source constructed above is
-	// the reason everything downstream fails, and the latency mode needs a
-	// runtime fallback (kLow / kNormal) on this model.
+	// Report platform capabilities independently of the selected playback mode.
 	auto ver = samsung::wasm::EmssVersionInfo::Create();
 	std::fprintf(stderr,
 		"[emss] caps: emss=%d legacy=%d ultra_low=%d low_lat_tex=%d decoding_mode=%d "
